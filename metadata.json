@@ -1,0 +1,8 @@
+{
+  "name": "Smart Business Automation Hub",
+  "description": "Unified business CRM, lead pipeline, commercial quotations, tax invoicing, customer sharing, support tickets, tasks, WhatsApp and email workflows, n8n webhook automation, and Gemini AI assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

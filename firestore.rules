@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Get user record to check organization and role
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isSuperAdmin() {
+      return isAuthenticated() && getUserData().role == 'super_admin';
+    }
+    
+    function isBusinessAdmin(orgId) {
+      return isAuthenticated() && (
+        getUserData().role == 'super_admin' || 
+        (getUserData().organizationId == orgId && getUserData().role == 'business_admin')
+      );
+    }
+    
+    function isSameOrg(orgId) {
+      return isAuthenticated() && (
+        getUserData().role == 'super_admin' || 
+        getUserData().organizationId == orgId
+      );
+    }
+    
+    function isViewer() {
+      return isAuthenticated() && getUserData().role == 'viewer';
+    }
+
+    // Organizations collection
+    match /organizations/{orgId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || getUserData().organizationId == orgId);
+      allow create: if isAuthenticated();
+      allow update, delete: if isBusinessAdmin(orgId);
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        request.auth.uid == userId || 
+        isBusinessAdmin(resource.data.organizationId)
+      );
+      allow delete: if isAuthenticated() && isBusinessAdmin(resource.data.organizationId);
+    }
+
+    // Tenant-isolated collections
+    match /{collectionName}/{docId} {
+      allow read: if isAuthenticated() && (
+        collectionName in ['customers', 'leads', 'complaints', 'tasks', 'documents', 'communications', 'notifications', 'automations', 'automationLogs', 'settings', 'activityLogs', 'quotations', 'invoices'] &&
+        (resource == null || isSameOrg(resource.data.organizationId))
+      );
+      
+      allow create: if isAuthenticated() && 
+        collectionName in ['customers', 'leads', 'complaints', 'tasks', 'documents', 'communications', 'notifications', 'automations', 'automationLogs', 'settings', 'activityLogs', 'quotations', 'invoices'] &&
+        !isViewer() &&
+        request.resource.data.organizationId == getUserData().organizationId;
+        
+      allow update: if isAuthenticated() &&
+        collectionName in ['customers', 'leads', 'complaints', 'tasks', 'documents', 'communications', 'notifications', 'automations', 'automationLogs', 'settings', 'activityLogs', 'quotations', 'invoices'] &&
+        !isViewer() &&
+        isSameOrg(resource.data.organizationId) &&
+        request.resource.data.organizationId == resource.data.organizationId;
+        
+      allow delete: if isAuthenticated() &&
+        collectionName in ['customers', 'leads', 'complaints', 'tasks', 'documents', 'communications', 'notifications', 'automations', 'automationLogs', 'settings', 'activityLogs', 'quotations', 'invoices'] &&
+        !isViewer() &&
+        (isBusinessAdmin(resource.data.organizationId) || getUserData().role == 'manager');
+    }
+  }
+}
