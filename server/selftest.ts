@@ -99,11 +99,26 @@ async function run(): Promise<void> {
     (refusalFrom(() => resolveWebhookUrl(undefined, 'https://attacker.test/collect')) ?? '').includes('not in N8N_ALLOWED_HOSTS')
   );
 
+  /*
+    The property that matters is that the caller's URL is never honoured, and
+    that is unchanged. What changed is what happens next: with a server default
+    configured, the dispatch goes THERE — the legitimate destination — instead
+    of being dropped. An attacker still cannot redirect anything; a real event
+    no longer disappears because someone's Settings row named a host this
+    deployment cannot reach.
+  */
   env({ N8N_WEBHOOK_URL: 'https://server.n8n.cloud/webhook/default' });
   check(
-    'with no allowlist, a client URL is ignored entirely (fails closed)',
+    "with no allowlist, a client URL is ignored and the server's own destination is used",
+    resolveWebhookUrl(undefined, 'https://attacker.test/collect') ===
+      'https://server.n8n.cloud/webhook/default'
+  );
+  env({});
+  check(
+    'with no allowlist AND no default, there is nowhere safe to send, so it is refused',
     (refusalFrom(() => resolveWebhookUrl(undefined, 'https://attacker.test/collect')) ?? '').includes('N8N_ALLOWED_HOSTS is not set')
   );
+  env({ N8N_WEBHOOK_URL: 'https://server.n8n.cloud/webhook/default' });
   check(
     'the server default is used when the client sends none',
     resolveWebhookUrl(undefined, undefined) === 'https://server.n8n.cloud/webhook/default'
@@ -127,6 +142,32 @@ async function run(): Promise<void> {
   check(
     'nothing configured at all is refused, not silently defaulted',
     (refusalFrom(() => resolveWebhookUrl(undefined, undefined)) ?? '').includes('No webhook URL')
+  );
+
+  /*
+    One codebase, two environments. The Settings document is shared between the
+    local dev server and the deployed one, so it holds a single URL. Each
+    server resolves it against its own allowlist.
+  */
+  env({ N8N_ALLOWED_HOSTS: 'good.n8n.cloud', N8N_WEBHOOK_URL: 'https://good.n8n.cloud/webhook/prod' });
+  check(
+    'a non-allowlisted host falls back to the server default rather than refusing',
+    resolveWebhookUrl(undefined, 'http://localhost:5678/webhook/dev') ===
+      'https://good.n8n.cloud/webhook/prod'
+  );
+
+  env({ N8N_ALLOWED_HOSTS: 'good.n8n.cloud,localhost', N8N_WEBHOOK_URL: 'https://good.n8n.cloud/webhook/prod' });
+  check(
+    'an allowlisted host still wins over the server default',
+    resolveWebhookUrl(undefined, 'http://localhost:5678/webhook/dev') ===
+      'http://localhost:5678/webhook/dev'
+  );
+
+  env({ N8N_ALLOWED_HOSTS: 'good.n8n.cloud' });
+  check(
+    'with no default there is nothing to fall back to, so it is still refused',
+    (refusalFrom(() => resolveWebhookUrl(undefined, 'http://localhost:5678/webhook/dev')) ?? '')
+      .includes('no N8N_WEBHOOK_URL')
   );
 
   env({ N8N_ALLOWED_HOSTS: 'good.n8n.cloud,localhost', NODE_ENV: 'production' });

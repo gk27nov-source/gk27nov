@@ -76,11 +76,38 @@ export function resolveWebhookUrl(ruleId: string | undefined, requestedUrl: stri
     const allowed = config.allowedHosts.includes(host) || (LOCAL_HOSTS.has(host) && config.allowedHosts.includes('localhost'));
 
     if (!allowed) {
+      /*
+        A URL this deployment may not reach.
+
+        If the server has its own configured destination, use that instead of
+        refusing. This is what makes one codebase work in two environments: the
+        Settings document lives in Firestore and is SHARED between your local
+        dev server and the deployed one, so it can only hold one URL. Point it
+        at your local n8n; the deployed server, whose allowlist does not include
+        localhost, quietly uses its own N8N_WEBHOOK_URL and keeps working.
+
+        Not silent, though — the substitution is logged here and the endpoint
+        actually used is recorded on the automation log entry, so nobody has to
+        guess where a dispatch went.
+
+        With no server default there is nothing safe to fall back to, so it is
+        still refused.
+      */
+      if (config.defaultWebhookUrl) {
+        console.warn(
+          `[dispatch] Host "${host}" is not in N8N_ALLOWED_HOSTS (${config.allowedHosts.join(', ') || 'empty'}); ` +
+            `using this server's N8N_WEBHOOK_URL instead. Expected on a deployment that shares its Settings ` +
+            `document with a local dev server.`
+        );
+        return assertUsable(config.defaultWebhookUrl, 'N8N_WEBHOOK_URL');
+      }
+
       throw new DispatchRefused(
         config.allowedHosts.length === 0
           ? 'Client-supplied webhook URLs are disabled because N8N_ALLOWED_HOSTS is not set. ' +
             'Configure N8N_WEBHOOK_URL on the server, or add the host to the allowlist.'
-          : `Host "${host}" is not in N8N_ALLOWED_HOSTS (${config.allowedHosts.join(', ')}).`
+          : `Host "${host}" is not in N8N_ALLOWED_HOSTS (${config.allowedHosts.join(', ')}), ` +
+            `and this server has no N8N_WEBHOOK_URL to fall back to.`
       );
     }
     return assertUsable(requested, 'the supplied webhook URL');

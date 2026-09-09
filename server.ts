@@ -526,10 +526,32 @@ async function start() {
   }
   primaryServer.on('error', (err: any) => {
     if (err.code === 'EADDRINUSE') {
-      console.log(`Port ${primaryPort} is already bound by existing process; proceeding with active server`);
-    } else {
-      console.error(`Error on port ${primaryPort}:`, err);
+      /*
+        This used to log "proceeding with active server" and carry on.
+
+        That reads like reassurance and is the opposite: the new process never
+        bound the port, so every request is still being served by the OLD
+        process — old code, old .env, old everything. You edit a file, restart,
+        see a friendly boot line, and test the previous build. It cost hours
+        before anyone noticed the config changes were not taking effect.
+
+        In production the message is kept, because AI Studio's container has a
+        proxy holding the port and the auxiliary listener below is the one that
+        matters. In development it is a dead end, so say so and stop.
+      */
+      if (process.env.NODE_ENV === 'production') {
+        console.log(`Port ${primaryPort} is already bound by existing process; proceeding with active server`);
+        return;
+      }
+      console.error(
+        `\nPort ${primaryPort} is already in use, so THIS server is not serving anything.\n` +
+          `Whatever answers on http://localhost:${primaryPort} is an older process.\n\n` +
+          `  Get-Process node | Stop-Process -Force\n\n` +
+          `Then start again. Exiting rather than pretending to have started.\n`
+      );
+      process.exit(1);
     }
+    console.error(`Error on port ${primaryPort}:`, err);
   });
 
   // When deployed to Cloud Run or environments where PORT is configured (e.g. 8080),
