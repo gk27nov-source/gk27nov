@@ -20,7 +20,9 @@ import {
   X,
   Send,
   MessageSquare,
+  Package,
 } from 'lucide-react';
+import { useInventory } from '../../context/InventoryContext';
 
 const COMPLAINT_TYPES: ComplaintType[] = [
   'Delivery Delay',
@@ -43,6 +45,7 @@ const COMPLAINT_STATUSES: ComplaintStatus[] = [
 
 export const ComplaintsView: React.FC = () => {
   const { complaints, addComplaint, updateComplaint, deleteComplaint, employees, currentUser, customers } = useApp();
+  const { products, stores, issueStockForComplaint } = useInventory();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterPriority, setFilterPriority] = useState<string>('All');
@@ -53,6 +56,15 @@ export const ComplaintsView: React.FC = () => {
   const [resolutionText, setResolutionText] = useState('');
   const [feedbackRating, setFeedbackRating] = useState<number>(5);
   const [customerFeedbackText, setCustomerFeedbackText] = useState('');
+
+  // Spares Issue Modal State
+  const [sparesModalTicket, setSparesModalTicket] = useState<Complaint | null>(null);
+  const [selectedSpareProductId, setSelectedSpareProductId] = useState<string>('');
+  const [selectedSpareStoreId, setSelectedSpareStoreId] = useState<string>('');
+  const [spareQty, setSpareQty] = useState<number>(1);
+  const [spareRemarks, setSpareRemarks] = useState<string>('');
+  const [isSubmittingSpare, setIsSubmittingSpare] = useState(false);
+  const [spareSuccessMsg, setSpareSuccessMsg] = useState<string | null>(null);
 
   // Form State for new ticket
   const initialFormState = {
@@ -364,6 +376,22 @@ export const ComplaintsView: React.FC = () => {
 
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => {
+                              setSparesModalTicket(ticket);
+                              setSelectedSpareProductId(products[0]?.id || '');
+                              setSelectedSpareStoreId(stores[0]?.id || '');
+                              setSpareQty(1);
+                              setSpareRemarks(`Spares issued for service ticket ${ticket.ticketNumber}`);
+                              setSpareSuccessMsg(null);
+                            }}
+                            className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors flex items-center gap-1 border border-slate-200"
+                            title="Issue spare part or replacement goods from warehouse stock"
+                          >
+                            <Package className="w-3 h-3 text-slate-500" />
+                            <span>Spares</span>
+                          </button>
+
                           {ticket.status !== 'Resolved' && ticket.status !== 'Closed' && (
                             <button
                               onClick={() => {
@@ -625,6 +653,152 @@ export const ComplaintsView: React.FC = () => {
                   className="px-5 py-2 font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-xs"
                 >
                   Confirm Resolution
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Spare Parts Warehouse Issue Modal */}
+      {sparesModalTicket && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between p-5 border-b border-slate-200 bg-blue-50/60">
+              <div className="flex items-center gap-2">
+                <Package className="w-5 h-5 text-blue-600" />
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">
+                    Issue Spare Parts from Warehouse
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    For Ticket {sparesModalTicket.ticketNumber} ({sparesModalTicket.customerName})
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSparesModalTicket(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!selectedSpareProductId) return;
+                setIsSubmittingSpare(true);
+                try {
+                  await issueStockForComplaint(
+                    sparesModalTicket.id,
+                    selectedSpareProductId,
+                    spareQty,
+                    spareRemarks,
+                    selectedSpareStoreId || stores[0]?.id
+                  );
+                  setSpareSuccessMsg(`Successfully issued ${spareQty} unit(s) for service ticket ${sparesModalTicket.ticketNumber}`);
+                  setTimeout(() => {
+                    setSparesModalTicket(null);
+                    setSpareSuccessMsg(null);
+                  }, 1200);
+                } catch (err: any) {
+                  alert(err.message || 'Failed to issue spares');
+                } finally {
+                  setIsSubmittingSpare(false);
+                }
+              }}
+              className="p-6 space-y-4 text-xs"
+            >
+              {spareSuccessMsg && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 font-semibold flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>{spareSuccessMsg}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Select Spare Part / SKU *</label>
+                <select
+                  required
+                  value={selectedSpareProductId}
+                  onChange={(e) => setSelectedSpareProductId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                >
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.sku} - {p.name} ({p.availableStock} {p.unit} available)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Source Store / Warehouse *</label>
+                  <select
+                    value={selectedSpareStoreId || stores[0]?.id}
+                    onChange={(e) => setSelectedSpareStoreId(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                  >
+                    {stores.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Quantity to Issue *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={spareQty}
+                    onChange={(e) => setSpareQty(Math.max(1, Number(e.target.value)))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                  />
+                </div>
+              </div>
+
+              {selectedSpareProductId && (
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[11px] text-slate-600 flex items-center justify-between">
+                  <span>Current Available Stock:</span>
+                  <strong className="text-slate-900">
+                    {products.find((p) => p.id === selectedSpareProductId)?.storeStocks?.[selectedSpareStoreId]?.availableStock ??
+                      products.find((p) => p.id === selectedSpareProductId)?.availableStock ??
+                      0}{' '}
+                    {products.find((p) => p.id === selectedSpareProductId)?.unit}
+                  </strong>
+                </div>
+              )}
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Remarks / Technician Note</label>
+                <textarea
+                  rows={2}
+                  value={spareRemarks}
+                  onChange={(e) => setSpareRemarks(e.target.value)}
+                  placeholder="Reason for replacement, e.g. damaged capacitor or sensor replacement..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setSparesModalTicket(null)}
+                  className="px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingSpare}
+                  className="px-5 py-2 font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-xs disabled:opacity-50"
+                >
+                  {isSubmittingSpare ? 'Issuing...' : 'Issue Goods & Deduct Stock'}
                 </button>
               </div>
             </form>

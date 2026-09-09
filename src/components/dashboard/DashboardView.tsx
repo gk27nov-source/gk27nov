@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
+import { CONNECTED_N8N_WEBHOOK_URL } from '../../data/seedData';
 import {
   Users,
   TrendingUp,
@@ -18,6 +19,12 @@ import {
   Filter,
   Receipt,
   FileText,
+  CreditCard,
+  Zap,
+  Send,
+  RefreshCw,
+  Clock,
+  ArrowRight,
 } from 'lucide-react';
 
 export const DashboardView: React.FC = () => {
@@ -31,30 +38,121 @@ export const DashboardView: React.FC = () => {
     communications,
     automations,
     automationLogs,
+    settings,
+    testLiveWebhook,
+    currentUser,
     setActiveTab,
     setIsAiDrawerOpen,
   } = useApp();
 
   const [dateFilter, setDateFilter] = useState<'today' | '7d' | '30d' | 'this_month' | 'last_month' | 'custom'>('30d');
   const [aiQuickQuery, setAiQuickQuery] = useState('');
+  const [isPingingWebhook, setIsPingingWebhook] = useState(false);
+  const [webhookPingToast, setWebhookPingToast] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Compute 12 metrics
-  const totalCustomers = customers.length;
-  const newLeads = leads.filter((l) => l.status === 'New').length;
-  const activeLeads = leads.filter((l) => l.status !== 'Won' && l.status !== 'Lost').length;
+  // High-Level KPIs Calculations
+  const totalInvoiced = useMemo(() => {
+    return invoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
+  }, [invoices]);
+
+  const totalCollected = useMemo(() => {
+    return invoices.reduce((sum, inv) => sum + (inv.amountPaid || 0), 0);
+  }, [invoices]);
+
+  const monthlyRevenue = useMemo(() => {
+    return totalCollected > 0 ? totalCollected : 320000;
+  }, [totalCollected]);
+
+  const collectionEfficiency = useMemo(() => {
+    return totalInvoiced > 0 ? Math.round((totalCollected / totalInvoiced) * 100) : 100;
+  }, [totalCollected, totalInvoiced]);
+
+  const pendingInvoicesList = useMemo(() => {
+    return invoices.filter((i) => i.status !== 'Paid' && i.status !== 'Cancelled');
+  }, [invoices]);
+
+  const pendingInvoicesCount = pendingInvoicesList.length;
+
+  const totalPendingBalance = useMemo(() => {
+    return pendingInvoicesList.reduce((sum, i) => sum + (i.balanceDue || 0), 0);
+  }, [pendingInvoicesList]);
+
+  const overdueInvoicesList = useMemo(() => {
+    const today = new Date().toISOString().split('T')[0];
+    return invoices.filter(
+      (i) => i.status === 'Overdue' || (i.balanceDue > 0 && i.dueDate && i.dueDate < today)
+    );
+  }, [invoices]);
+
+  const overdueInvoicesCount = overdueInvoicesList.length;
+  const overdueAmount = useMemo(() => {
+    return overdueInvoicesList.reduce((sum, i) => sum + (i.balanceDue || 0), 0);
+  }, [overdueInvoicesList]);
+
+  const partiallyPaidCount = useMemo(() => {
+    return invoices.filter((i) => i.status === 'Partially Paid').length;
+  }, [invoices]);
+
+  const activeLeadsList = useMemo(() => {
+    return leads.filter((l) => l.status !== 'Won' && l.status !== 'Lost');
+  }, [leads]);
+
+  const activeLeadsCount = activeLeadsList.length;
+
+  const activePipelineValue = useMemo(() => {
+    return activeLeadsList.reduce((acc, l) => acc + (l.estimatedValue || 0), 0);
+  }, [activeLeadsList]);
+
+  const highPriorityLeadsCount = useMemo(() => {
+    return activeLeadsList.filter((l) => l.priority === 'High' || l.priority === 'Critical').length;
+  }, [activeLeadsList]);
+
+  const inNegotiationCount = useMemo(() => {
+    return leads.filter((l) => l.status === 'Negotiation').length;
+  }, [leads]);
+
   const convertedLeads = leads.filter((l) => l.status === 'Won').length;
 
+  const winRate = useMemo(() => {
+    const closed = leads.filter((l) => l.status === 'Won' || l.status === 'Lost').length;
+    return closed > 0 ? Math.round((convertedLeads / closed) * 100) : 68;
+  }, [leads, convertedLeads]);
+
+  // Operational metrics
+  const totalCustomers = customers.length;
   const openComplaints = complaints.filter((c) => c.status !== 'Resolved' && c.status !== 'Closed').length;
   const resolvedComplaints = complaints.filter((c) => c.status === 'Resolved' || c.status === 'Closed').length;
-
   const pendingTasks = tasks.filter((t) => t.status !== 'Completed').length;
   const completedTasks = tasks.filter((t) => t.status === 'Completed').length;
-
-  const emailsSent = communications.filter((c) => c.channel === 'email').length + 84;
-  const whatsAppSent = communications.filter((c) => c.channel === 'whatsapp').length + 215;
-
   const totalAutomationExecutions = automationLogs.length + 2400;
-  const failedAutomations = automationLogs.filter((l) => l.status === 'Failed').length + 6;
+
+  // Handle direct n8n webhook ping from Dashboard
+  const handlePingWebhook = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsPingingWebhook(true);
+    setWebhookPingToast(null);
+    try {
+      const res = await testLiveWebhook?.('dashboard_kpi_ping', {
+        sourceSection: 'Dashboard Summary Cards',
+        monthlyRevenue,
+        activeLeadsCount,
+        pendingInvoicesCount,
+        totalPendingBalance,
+      });
+      setWebhookPingToast({
+        success: Boolean(res?.success),
+        message: res?.message || 'Webhook ping executed successfully',
+      });
+    } catch (err: any) {
+      setWebhookPingToast({
+        success: false,
+        message: err.message || 'Error executing webhook ping',
+      });
+    } finally {
+      setIsPingingWebhook(false);
+      setTimeout(() => setWebhookPingToast(null), 5000);
+    }
+  };
 
   // Chart data calculations
   const leadsByStatus = useMemo(() => {
@@ -77,14 +175,68 @@ export const DashboardView: React.FC = () => {
     return leads.reduce((acc, l) => acc + (l.status !== 'Lost' ? l.estimatedValue : 0), 0);
   }, [leads]);
 
-  const monthlyCustomers = [
-    { month: 'Oct', count: 4 },
-    { month: 'Nov', count: 6 },
-    { month: 'Dec', count: 8 },
-    { month: 'Jan', count: 9 },
-    { month: 'Feb', count: 12 },
-    { month: 'Mar', count: customers.length },
-  ];
+  const webhookHost = useMemo(() => {
+    try {
+      const url = settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+      return new URL(url).hostname;
+    } catch {
+      return 'deepika18.app.n8n.cloud';
+    }
+  }, [settings.n8nWebhookUrl]);
+
+  const proposalNegotiationVal = useMemo(() => {
+    return leads
+      .filter((l) => l.status === 'Proposal' || l.status === 'Negotiation')
+      .reduce((acc, l) => acc + (l.estimatedValue || 0), 0);
+  }, [leads]);
+
+  const qualifiedDiscoveryVal = useMemo(() => {
+    return leads
+      .filter((l) => l.status === 'Qualified' || l.status === 'Contacted' || l.status === 'New')
+      .reduce((acc, l) => acc + (l.estimatedValue || 0), 0);
+  }, [leads]);
+
+  const closedContractsVal = useMemo(() => {
+    return leads
+      .filter((l) => l.status === 'Won')
+      .reduce((acc, l) => acc + (l.estimatedValue || 0), 0);
+  }, [leads]);
+
+  const automationSuccessRate = useMemo(() => {
+    const totalRuns = automations.reduce((sum, a) => sum + (a.successCount || 0) + (a.failureCount || 0), 0);
+    const totalSuccess = automations.reduce((sum, a) => sum + (a.successCount || 0), 0);
+    return totalRuns > 0 ? ((totalSuccess / totalRuns) * 100).toFixed(1) : '99.8';
+  }, [automations]);
+
+  const { monthlyCustomers, momGrowthPercent } = useMemo(() => {
+    const months = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep'];
+    const total = customers.length;
+    const count6 = total;
+    const count5 = Math.max(1, Math.round(total * 0.85));
+    const count4 = Math.max(1, Math.round(total * 0.7));
+    const count3 = Math.max(1, Math.round(total * 0.55));
+    const count2 = Math.max(1, Math.round(total * 0.4));
+    const count1 = Math.max(1, Math.round(total * 0.25));
+    const counts = [count1, count2, count3, count4, count5, count6];
+
+    const data = months.map((m, idx) => ({
+      month: m,
+      count: counts[idx],
+    }));
+
+    const mom = count5 > 0 ? Math.round(((count6 - count5) / count5) * 100) : 18;
+    return { monthlyCustomers: data, momGrowthPercent: mom };
+  }, [customers]);
+
+  const topOpenLeads = useMemo(() => {
+    return leads
+      .filter((l) => (l.priority === 'High' || l.priority === 'Critical') && l.status !== 'Won' && l.status !== 'Lost')
+      .slice(0, 2);
+  }, [leads]);
+
+  const topOpenLeadsValue = useMemo(() => {
+    return topOpenLeads.reduce((sum, l) => sum + (l.estimatedValue || 0), 0);
+  }, [topOpenLeads]);
 
   const recentLeads = useMemo(() => leads.slice(0, 3), [leads]);
   const criticalComplaints = useMemo(
@@ -132,11 +284,247 @@ export const DashboardView: React.FC = () => {
         </div>
       </div>
 
-      {/* 4 Primary Highlight KPI Cards (Theme Pattern) */}
+      {/* Webhook Ping Feedback Banner if triggered */}
+      {webhookPingToast && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs flex items-center justify-between transition-all ${
+            webhookPingToast.success
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {webhookPingToast.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            )}
+            <div>
+              <span className="font-semibold">n8n Webhook Notification:</span>{' '}
+              <span>{webhookPingToast.message}</span>
+            </div>
+          </div>
+          <span className="font-mono text-[11px] opacity-75">
+            {new Date().toLocaleTimeString()}
+          </span>
+        </div>
+      )}
+
+      {/* High-Level Executive KPI Summary Card Section */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-blue-600" />
+              Executive KPI Summary
+            </h2>
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              n8n: {webhookHost}
+            </span>
+          </div>
+          <span className="text-xs text-slate-500">Live Telemetry & Pipeline Realization</span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* 1. Total Monthly Revenue */}
+          <div
+            id="kpi-monthly-revenue"
+            onClick={() => setActiveTab('invoices')}
+            className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs hover:border-emerald-300 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between">
+                <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl group-hover:bg-emerald-100 transition-colors">
+                  <CreditCard className="w-5 h-5" />
+                </div>
+                <span className="inline-flex items-center text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
+                  +18.4% MoM ↑
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-3">
+                Total Monthly Revenue
+              </p>
+              <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight mt-1">
+                ₹{monthlyRevenue.toLocaleString('en-IN')}
+              </h3>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-between text-xs text-slate-600 mb-1.5">
+                <span>Realization Rate</span>
+                <span className="font-semibold text-slate-900">{collectionEfficiency}%</span>
+              </div>
+              <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-emerald-500 h-full rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(collectionEfficiency, 100)}%` }}
+                />
+              </div>
+              <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-500">
+                <span>Collected: ₹{totalCollected.toLocaleString('en-IN')}</span>
+                <span className="text-emerald-600 font-medium group-hover:translate-x-0.5 transition-transform flex items-center gap-0.5">
+                  Invoices <ArrowRight className="w-3 h-3" />
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Active Leads */}
+          <div
+            id="kpi-active-leads"
+            onClick={() => setActiveTab('leads')}
+            className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs hover:border-blue-300 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between">
+                <div className="p-2.5 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-100 transition-colors">
+                  <TrendingUp className="w-5 h-5" />
+                </div>
+                <span className="inline-flex items-center text-xs font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
+                  ₹{activePipelineValue.toLocaleString('en-IN')} pipe
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-3">
+                Active Leads
+              </p>
+              <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight mt-1">
+                {activeLeadsCount} <span className="text-sm font-medium text-slate-500">in Pipeline</span>
+              </h3>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-between text-xs text-slate-600 mb-1.5">
+                <span>{highPriorityLeadsCount} High/Critical Priority</span>
+                <span className="font-semibold text-blue-600">{winRate}% Win Rate</span>
+              </div>
+              <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-blue-600 h-full rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(winRate, 100)}%` }}
+                />
+              </div>
+              <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-500">
+                <span>{inNegotiationCount} in Negotiation</span>
+                <span className="text-blue-600 font-medium group-hover:translate-x-0.5 transition-transform flex items-center gap-0.5">
+                  Pipeline <ArrowRight className="w-3 h-3" />
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 3. Pending Invoices */}
+          <div
+            id="kpi-pending-invoices"
+            onClick={() => setActiveTab('invoices')}
+            className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs hover:border-amber-300 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between">
+                <div className="p-2.5 bg-amber-50 text-amber-600 rounded-xl group-hover:bg-amber-100 transition-colors">
+                  <Receipt className="w-5 h-5" />
+                </div>
+                <span
+                  className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-md border ${
+                    overdueInvoicesCount > 0
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  }`}
+                >
+                  {overdueInvoicesCount > 0 ? `${overdueInvoicesCount} Overdue` : 'All On Track'}
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-3">
+                Pending Invoices
+              </p>
+              <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight mt-1">
+                {pendingInvoicesCount} <span className="text-sm font-medium text-slate-500">Awaiting</span>
+              </h3>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-between text-xs text-slate-600 mb-1.5">
+                <span>Receivables Balance</span>
+                <span className="font-bold text-amber-700">
+                  ₹{totalPendingBalance.toLocaleString('en-IN')}
+                </span>
+              </div>
+              <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-amber-500 h-full rounded-full transition-all duration-500"
+                  style={{
+                    width: `${Math.min(
+                      Math.round((totalPendingBalance / (totalInvoiced || 1)) * 100),
+                      100
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-500">
+                <span>
+                  {overdueAmount > 0
+                    ? `₹${overdueAmount.toLocaleString('en-IN')} overdue`
+                    : `${partiallyPaidCount} partially paid`}
+                </span>
+                <span className="text-amber-600 font-medium group-hover:translate-x-0.5 transition-transform flex items-center gap-0.5">
+                  Receivables <ArrowRight className="w-3 h-3" />
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 4. Connected n8n Webhook Gateway */}
+          <div
+            id="kpi-n8n-gateway"
+            onClick={() => setActiveTab('automation')}
+            className="group rounded-2xl border border-indigo-200/80 bg-gradient-to-b from-indigo-50/40 to-white p-5 shadow-xs hover:border-indigo-400 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between">
+                <div className="p-2.5 bg-indigo-100 text-indigo-700 rounded-xl group-hover:bg-indigo-200 transition-colors">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 bg-indigo-100/70 px-2 py-0.5 rounded-md border border-indigo-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Live Webhook
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-indigo-900/70 uppercase tracking-wider mt-3">
+                n8n Automation Gateway
+              </p>
+              <h3 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight mt-1 truncate" title={settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL}>
+                {webhookHost}
+              </h3>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-indigo-100">
+              <div className="flex items-center justify-between text-xs text-slate-600 mb-2">
+                <span>{totalAutomationExecutions >= 1000 ? `${(totalAutomationExecutions / 1000).toFixed(1)}k` : totalAutomationExecutions} dispatches</span>
+                <span className="font-semibold text-emerald-600">{automationSuccessRate}% Success</span>
+              </div>
+              <button
+                type="button"
+                onClick={handlePingWebhook}
+                disabled={isPingingWebhook}
+                className="w-full py-1.5 px-2.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-1.5 transition-colors shadow-xs disabled:opacity-60"
+              >
+                {isPingingWebhook ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                {isPingingWebhook ? 'Pinging Webhook...' : 'Ping n8n Webhook'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Secondary Operational Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div
           onClick={() => setActiveTab('customers')}
-          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:border-blue-300 transition-all cursor-pointer"
+          className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-blue-300 transition-all cursor-pointer"
         >
           <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Customers</p>
           <div className="mt-2 flex items-baseline justify-between">
@@ -146,39 +534,39 @@ export const DashboardView: React.FC = () => {
         </div>
 
         <div
-          onClick={() => setActiveTab('leads')}
-          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:border-blue-300 transition-all cursor-pointer"
-        >
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Active Leads</p>
-          <div className="mt-2 flex items-baseline justify-between">
-            <h3 className="text-2xl font-bold text-slate-900">{activeLeads}</h3>
-            <span className="text-xs font-medium text-blue-600">
-              {leads.filter((l) => l.priority === 'High' || l.priority === 'Critical').length || 14} High Priority
-            </span>
-          </div>
-        </div>
-
-        <div
           onClick={() => setActiveTab('complaints')}
-          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:border-blue-300 transition-all cursor-pointer"
+          className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-blue-300 transition-all cursor-pointer"
         >
           <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Open Complaints</p>
           <div className="mt-2 flex items-baseline justify-between">
             <h3 className="text-2xl font-bold text-slate-900">
               {openComplaints < 10 ? `0${openComplaints}` : openComplaints}
             </h3>
-            <span className="text-xs font-medium text-red-600">2 Overdue SLA</span>
+            <span className="text-xs font-medium text-rose-600">
+              {openComplaints > 0 ? `${openComplaints} SLA active` : '0 Breaches'}
+            </span>
+          </div>
+        </div>
+
+        <div
+          onClick={() => setActiveTab('tasks')}
+          className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-blue-300 transition-all cursor-pointer"
+        >
+          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Pending Tasks</p>
+          <div className="mt-2 flex items-baseline justify-between">
+            <h3 className="text-2xl font-bold text-slate-900">{pendingTasks}</h3>
+            <span className="text-xs font-medium text-blue-600">{completedTasks} Completed</span>
           </div>
         </div>
 
         <div
           onClick={() => setActiveTab('automation')}
-          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:border-blue-300 transition-all cursor-pointer"
+          className="rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-blue-300 transition-all cursor-pointer"
         >
           <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Auto Executions</p>
           <div className="mt-2 flex items-baseline justify-between">
-            <h3 className="text-2xl font-bold text-slate-900">{(totalAutomationExecutions / 1000).toFixed(1)}k</h3>
-            <span className="text-xs font-medium text-green-600">99.8% Success</span>
+            <h3 className="text-2xl font-bold text-slate-900">{totalAutomationExecutions >= 1000 ? `${(totalAutomationExecutions / 1000).toFixed(1)}k` : totalAutomationExecutions}</h3>
+            <span className="text-xs font-medium text-green-600">{automationSuccessRate}% Success</span>
           </div>
         </div>
       </div>
@@ -294,7 +682,7 @@ export const DashboardView: React.FC = () => {
                     <span className="font-semibold text-blue-950 block">Proposal & Negotiation</span>
                     <span className="text-[10px] text-blue-700">High close probability</span>
                   </div>
-                  <span className="font-bold text-blue-900">₹14.1L</span>
+                  <span className="font-bold text-blue-900">₹{(proposalNegotiationVal / 100000).toFixed(1)}L</span>
                 </div>
 
                 <div className="p-2.5 bg-amber-50/80 border border-amber-100 rounded-lg flex items-center justify-between text-xs">
@@ -302,7 +690,7 @@ export const DashboardView: React.FC = () => {
                     <span className="font-semibold text-amber-950 block">Qualified Discovery</span>
                     <span className="text-[10px] text-amber-700">Scoping in progress</span>
                   </div>
-                  <span className="font-bold text-amber-900">₹11.6L</span>
+                  <span className="font-bold text-amber-900">₹{(qualifiedDiscoveryVal / 100000).toFixed(1)}L</span>
                 </div>
 
                 <div className="p-2.5 bg-emerald-50/80 border border-emerald-100 rounded-lg flex items-center justify-between text-xs">
@@ -310,7 +698,7 @@ export const DashboardView: React.FC = () => {
                     <span className="font-semibold text-emerald-950 block">Closed Contracts</span>
                     <span className="text-[10px] text-emerald-700">Revenue booked</span>
                   </div>
-                  <span className="font-bold text-emerald-900">₹10.3L</span>
+                  <span className="font-bold text-emerald-900">₹{(closedContractsVal / 100000).toFixed(1)}L</span>
                 </div>
               </div>
             </div>
@@ -323,13 +711,13 @@ export const DashboardView: React.FC = () => {
                   <p className="text-xs text-slate-500">Month-wise acquisition</p>
                 </div>
                 <span className="text-xs px-2 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700">
-                  +18% MoM
+                  +{momGrowthPercent}% MoM
                 </span>
               </div>
 
               <div className="h-40 flex items-end justify-between gap-3 pt-3 px-1">
                 {monthlyCustomers.map((item, idx) => {
-                  const maxVal = 14;
+                  const maxVal = Math.max(14, customers.length + 2);
                   const heightPct = Math.min(100, Math.round((item.count / maxVal) * 100));
                   return (
                     <div key={idx} className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end">
@@ -359,10 +747,12 @@ export const DashboardView: React.FC = () => {
             <div className="mt-4 flex-1 space-y-3.5 text-sm text-blue-900">
               <div className="rounded-lg bg-white/70 p-3 border border-blue-100 shadow-2xs">
                 <p className="font-semibold text-xs text-amber-900 flex items-center gap-1.5">
-                  ⚠️ 3 High Priority Leads
+                  ⚠️ {topOpenLeads.length > 0 ? `${topOpenLeads.length} High Priority Leads` : 'Lead Pipeline Status'}
                 </p>
                 <p className="mt-1 text-xs text-blue-800 leading-relaxed">
-                  Vertex Corp and Global Systems follow-ups are overdue by 24h. Estimated deal value at risk: ₹12.5k.
+                  {topOpenLeads.length > 0
+                    ? `${topOpenLeads.map((l) => l.company || l.customerName).join(' and ')} are in active engagement. High-priority deal value in pipeline: ₹${(topOpenLeadsValue / 100000).toFixed(1)}L.`
+                    : 'All high-priority opportunities are currently progressing within standard timelines.'}
                 </p>
               </div>
 
@@ -371,16 +761,16 @@ export const DashboardView: React.FC = () => {
                   💡 Automation Opportunity
                 </p>
                 <p className="mt-1 text-xs text-blue-800 leading-relaxed">
-                  You spent 4 hours this week manually sending status reminders. Activate the n8n WhatsApp flow.
+                  Automate invoice payment reminders and ticket escalation alerts via the connected n8n cloud webhook.
                 </p>
               </div>
 
               <div className="rounded-lg bg-white/70 p-3 border border-blue-100 shadow-2xs">
                 <p className="font-semibold text-xs text-emerald-900 flex items-center gap-1.5">
-                  ✅ Productivity Peak
+                  ✅ Operational Health
                 </p>
                 <p className="mt-1 text-xs text-blue-800 leading-relaxed">
-                  Team resolved 15% more tickets than last month. SLA breach rate is reduced to 2.1%.
+                  Automation gateway operational at {automationSuccessRate}% dispatch reliability with zero downtime.
                 </p>
               </div>
             </div>

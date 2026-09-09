@@ -198,6 +198,7 @@ export interface Communication {
   customerName: string;
   channel: CommunicationChannel;
   type: 'incoming' | 'outgoing';
+  recipient?: string;
   templateName?: string;
   subject?: string;
   message: string;
@@ -247,7 +248,12 @@ export interface AutomationRule {
     | 'task_overdue'
     | 'document_uploaded'
     | 'followup_due'
-    | 'callback_requested';
+    | 'callback_requested'
+    | 'invoice_due'
+    | 'invoice_overdue'
+    | 'new_invoice'
+    | 'new_quotation'
+    | 'payment_received';
   isEnabled: boolean;
   targetWebhookUrl?: string;
   authType?: 'none' | 'bearer' | 'header';
@@ -277,6 +283,9 @@ export interface AutomationLog {
   responseMessage?: string;
   response?: any;
   errorMessage?: string;
+  targetWebhookUrl?: string;
+  diagnosticHint?: string;
+  n8nHint?: string;
   retryCount: number;
 }
 
@@ -304,7 +313,7 @@ export interface ActivityLog {
   userId: string;
   userName: string;
   action: 'create' | 'update' | 'delete' | 'status_change' | 'import' | 'export' | 'automation_trigger' | 'login';
-  module: 'customers' | 'leads' | 'complaints' | 'tasks' | 'documents' | 'automations' | 'settings' | 'users' | 'quotations' | 'invoices';
+  module: 'customers' | 'leads' | 'complaints' | 'tasks' | 'documents' | 'automations' | 'settings' | 'users' | 'quotations' | 'invoices' | 'products' | 'stores' | 'suppliers' | 'inventory';
   recordId: string;
   recordTitle: string;
   oldValue?: string;
@@ -409,4 +418,7 @@ export interface Invoice {
   createdAt: string;
   updatedAt: string;
 }
+
+export * from './inventory';
+
 

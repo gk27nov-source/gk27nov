@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { CONNECTED_N8N_WEBHOOK_URL } from '../../data/seedData';
 import {
   Settings,
   Building,
@@ -16,7 +17,19 @@ import {
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
-  const { currentOrg, updateOrganization, customers, leads, complaints, tasks, communications, documents, resetSeedData } = useApp();
+  const {
+    currentOrg,
+    settings,
+    updateSettings,
+    updateOrganization,
+    customers,
+    leads,
+    complaints,
+    tasks,
+    communications,
+    documents,
+    resetSeedData,
+  } = useApp();
 
   const [activeTab, setActiveTab] = useState<'profile' | 'integrations' | 'data'>('profile');
 
@@ -35,8 +48,8 @@ export const SettingsView: React.FC = () => {
 
   // Integrations form
   const [integrationForm, setIntegrationForm] = useState({
-    n8nWebhookUrl: currentOrg.n8nWebhookUrl || 'https://n8n.apexsolutions.in/webhook/business-hub',
-    n8nApiKey: currentOrg.n8nApiKey || 'n8n_sec_89df201934ba',
+    n8nWebhookUrl: settings?.n8nWebhookUrl || currentOrg.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL,
+    n8nApiKey: settings?.n8nApiKey || currentOrg.n8nApiKey || 'n8n_sec_89df201934ba',
     whatsappApiStatus: 'Connected (Meta Cloud API)',
     emailService: 'Verified (Google Workspace SMTP)',
     geminiModel: 'gemini-2.5-flash (Google GenAI)',
@@ -51,7 +64,7 @@ export const SettingsView: React.FC = () => {
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
-    updateOrganization({
+    updateOrganization?.({
       name: profileForm.name,
       industry: profileForm.industry,
       taxId: profileForm.taxId,
@@ -64,13 +77,21 @@ export const SettingsView: React.FC = () => {
     showToast('Business Profile successfully updated!');
   };
 
-  const handleSaveIntegrations = (e: React.FormEvent) => {
+  const handleSaveIntegrations = async (e: React.FormEvent) => {
     e.preventDefault();
-    updateOrganization({
-      n8nWebhookUrl: integrationForm.n8nWebhookUrl,
-      n8nApiKey: integrationForm.n8nApiKey,
-    });
-    showToast('Integration endpoints updated successfully!');
+    if (updateSettings) {
+      await updateSettings({
+        n8nWebhookUrl: integrationForm.n8nWebhookUrl,
+        n8nApiKey: integrationForm.n8nApiKey,
+      });
+    }
+    if (updateOrganization) {
+      await updateOrganization({
+        n8nWebhookUrl: integrationForm.n8nWebhookUrl,
+        n8nApiKey: integrationForm.n8nApiKey,
+      });
+    }
+    showToast('Connected n8n webhook and integration endpoints updated successfully!');
   };
 
   const handleExportFullBackup = () => {

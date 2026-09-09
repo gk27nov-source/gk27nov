@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Quotation, InvoiceItem, QuotationStatus } from '../../types';
 import { formatCurrency } from './invoiceUtils';
-import { X, Plus, Trash2, Calculator, Check, AlertCircle } from 'lucide-react';
+import { X, Plus, Trash2, Calculator, Check, AlertCircle, Package } from 'lucide-react';
+import { useInventory } from '../../context/InventoryContext';
 
 interface QuotationModalProps {
   quotation?: Quotation | null;
@@ -16,6 +17,7 @@ export const QuotationModal: React.FC<QuotationModalProps> = ({
   onSaved,
 }) => {
   const { customers, addQuotation, updateQuotation, quotations } = useApp();
+  const { products } = useInventory();
 
   const isEditing = !!quotation;
 
@@ -437,74 +439,119 @@ export const QuotationModal: React.FC<QuotationModalProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {items.map((item, index) => (
-                    <tr key={item.id} className="hover:bg-slate-50/60">
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          required
-                          value={item.description}
-                          onChange={(e) => updateItem(index, 'description', e.target.value)}
-                          placeholder="Item name / service description"
-                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="number"
-                          min="1"
-                          value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-center text-xs"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="number"
-                          min="0"
-                          value={item.unitPrice}
-                          onChange={(e) => updateItem(index, 'unitPrice', Number(e.target.value))}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-right font-mono text-xs"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <select
-                          value={item.taxRate}
-                          onChange={(e) => updateItem(index, 'taxRate', Number(e.target.value))}
-                          className="w-full px-1 py-1.5 border border-slate-200 rounded-lg text-center text-xs"
-                        >
-                          <option value="0">0%</option>
-                          <option value="5">5%</option>
-                          <option value="12">12%</option>
-                          <option value="18">18%</option>
-                          <option value="28">28%</option>
-                        </select>
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="number"
-                          min="0"
-                          value={item.discount}
-                          onChange={(e) => updateItem(index, 'discount', Number(e.target.value))}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-right font-mono text-xs"
-                        />
-                      </td>
-                      <td className="p-2 text-right font-mono font-bold text-slate-800">
-                        {formatCurrency(item.total, currency)}
-                      </td>
-                      <td className="p-2 text-center">
-                        {items.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeItem(index)}
-                            className="p-1 text-slate-400 hover:text-red-600 rounded"
+                  {items.map((item, index) => {
+                    const matchedProduct = products.find(
+                      (p) => (item as any).productId === p.id || (p.sku && item.description.includes(p.sku))
+                    );
+
+                    return (
+                      <tr key={item.id} className="hover:bg-slate-50/60">
+                        <td className="p-2">
+                          <div className="space-y-1.5">
+                            <input
+                              type="text"
+                              required
+                              value={item.description}
+                              onChange={(e) => updateItem(index, 'description', e.target.value)}
+                              placeholder="Item name / service description"
+                              className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs"
+                            />
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={(item as any).productId || (matchedProduct ? matchedProduct.id : '')}
+                                onChange={(e) => {
+                                  const prod = products.find((p) => p.id === e.target.value);
+                                  if (prod) {
+                                    updateItem(index, 'description', `${prod.name} (${prod.sku})`);
+                                    updateItem(index, 'unitPrice', prod.sellingPrice || prod.purchasePrice);
+                                    updateItem(index, 'taxRate', prod.gstRate || 18);
+                                    setItems((prev) =>
+                                      prev.map((it, idx) => (idx === index ? { ...it, productId: prod.id } : it))
+                                    );
+                                  }
+                                }}
+                                className="text-[11px] px-2 py-0.5 border border-slate-200 rounded bg-slate-50 text-slate-600 max-w-[200px] truncate"
+                              >
+                                <option value="">Select from Inventory Catalog...</option>
+                                {products.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.sku} - {p.name} ({p.availableStock} in stock)
+                                  </option>
+                                ))}
+                              </select>
+
+                              {matchedProduct && (
+                                <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                  matchedProduct.availableStock <= 0
+                                    ? 'bg-rose-100 text-rose-800'
+                                    : matchedProduct.availableStock <= matchedProduct.minStockAlert
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : 'bg-emerald-100 text-emerald-800'
+                                }`}>
+                                  <Package className="w-2.5 h-2.5" />
+                                  {matchedProduct.availableStock} {matchedProduct.unit} available
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="p-2 align-top pt-3">
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.quantity}
+                            onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
+                            className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-center text-xs"
+                          />
+                        </td>
+                        <td className="p-2 align-top pt-3">
+                          <input
+                            type="number"
+                            min="0"
+                            value={item.unitPrice}
+                            onChange={(e) => updateItem(index, 'unitPrice', Number(e.target.value))}
+                            className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-right font-mono text-xs"
+                          />
+                        </td>
+                        <td className="p-2 align-top pt-3">
+                          <select
+                            value={item.taxRate}
+                            onChange={(e) => updateItem(index, 'taxRate', Number(e.target.value))}
+                            className="w-full px-1 py-1.5 border border-slate-200 rounded-lg text-center text-xs"
                           >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                            <option value="0">0%</option>
+                            <option value="5">5%</option>
+                            <option value="12">12%</option>
+                            <option value="18">18%</option>
+                            <option value="28">28%</option>
+                          </select>
+                        </td>
+                        <td className="p-2 align-top pt-3">
+                          <input
+                            type="number"
+                            min="0"
+                            value={item.discount}
+                            onChange={(e) => updateItem(index, 'discount', Number(e.target.value))}
+                            className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-right font-mono text-xs"
+                          />
+                        </td>
+                        <td className="p-2 align-top pt-4 text-right font-mono font-bold text-slate-800">
+                          {formatCurrency(item.total, currency)}
+                        </td>
+                        <td className="p-2 align-top pt-3 text-center">
+                          {items.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeItem(index)}
+                              className="p-1 text-slate-400 hover:text-red-600 rounded"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

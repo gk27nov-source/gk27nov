@@ -166,7 +166,7 @@ export const EmployeesView: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-2">
                     <Phone className="w-3.5 h-3.5 text-slate-400" />
-                    <span>{emp.mobile || '+91 98450 12345'}</span>
+                    <span>{emp.phone || emp.mobile || '+91 98200 11223'}</span>
                   </div>
                 </div>
               </div>

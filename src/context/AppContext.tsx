@@ -37,7 +37,9 @@ import {
   initialQuotations,
   initialInvoices,
   DEMO_ORG_ID,
+  CONNECTED_N8N_WEBHOOK_URL,
 } from '../data/seedData';
+import { buildWebhookPayload } from '../utils/webhookPayloadBuilder';
 import { auth, db } from '../firebase/config';
 import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
 import {
@@ -130,6 +132,32 @@ interface AppContextType {
   toggleAutomationRule: (ruleId: string) => Promise<void>;
   triggerAutomationRule: (ruleId: string, customPayload?: Record<string, any>) => Promise<AutomationLog>;
   retryAutomationLog: (logId: string) => Promise<void>;
+  testLiveWebhook: (
+    customEvent?: string,
+    customData?: Record<string, any>
+  ) => Promise<{
+    success: boolean;
+    message: string;
+    durationMs?: number;
+    diagnosticHint?: string;
+    n8nHint?: string;
+    statusCode?: number;
+  }>;
+  switchWebhookMode: (mode: 'production' | 'test') => Promise<void>;
+  runWebhookDiagnostics: (customUrl?: string) => Promise<any>;
+  dispatchWebhookEvent: (event: string, entityData: Record<string, any>, customRuleName?: string) => Promise<void>;
+  logActivity: (
+    action: ActivityLog['action'],
+    module: ActivityLog['module'],
+    recordId: string,
+    recordTitle: string,
+    oldValue?: string,
+    newValue?: string
+  ) => void;
+
+  // Aliases for compatibility
+  updateOrganization?: (orgUpdates: Partial<Organization>) => Promise<void>;
+  resetSeedData?: () => Promise<void>;
 
   markNotificationAsRead: (id: string) => Promise<void>;
   markAllNotificationsAsRead: () => Promise<void>;
@@ -196,7 +224,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [automations, setAutomations] = useState<AutomationRule[]>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_automations`);
-    return saved ? JSON.parse(saved) : initialAutomationRules;
+    if (saved) {
+      try {
+        const parsed: AutomationRule[] = JSON.parse(saved);
+        return parsed.map((rule) => ({
+          ...rule,
+          targetWebhookUrl:
+            !rule.targetWebhookUrl ||
+            rule.targetWebhookUrl.includes('apexsolutions.com') ||
+            rule.targetWebhookUrl.includes('yourdomain.com') ||
+            rule.targetWebhookUrl.includes('angoori.app.n8n.cloud')
+              ? CONNECTED_N8N_WEBHOOK_URL
+              : rule.targetWebhookUrl,
+          triggerEvent:
+            rule.id === 'auto_05' && rule.triggerEvent === 'callback_requested'
+              ? 'invoice_due'
+              : rule.triggerEvent,
+          authType:
+            rule.apiKey && (rule.apiKey.includes('993821049281') || rule.apiKey.includes('sla_alert_token') || rule.apiKey.includes('task_webhook_sec') || rule.apiKey.includes('pay_remind_token') || rule.apiKey.includes('ai_doc_api'))
+              ? 'none'
+              : rule.authType || 'none',
+          apiKey:
+            rule.apiKey && (rule.apiKey.includes('993821049281') || rule.apiKey.includes('sla_alert_token') || rule.apiKey.includes('task_webhook_sec') || rule.apiKey.includes('pay_remind_token') || rule.apiKey.includes('ai_doc_api'))
+              ? ''
+              : rule.apiKey || '',
+        }));
+      } catch {
+        return initialAutomationRules;
+      }
+    }
+    return initialAutomationRules;
   });
 
   const [automationLogs, setAutomationLogs] = useState<AutomationLog[]>(() => {
@@ -216,7 +273,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [settings, setSettings] = useState<OrganizationSettings>(() => {
     const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_settings`);
-    return saved ? JSON.parse(saved) : initialSettings;
+    if (saved) {
+      try {
+        const parsed: OrganizationSettings = JSON.parse(saved);
+        if (
+          !parsed.n8nWebhookUrl ||
+          parsed.n8nWebhookUrl.includes('apexsolutions.com') ||
+          parsed.n8nWebhookUrl.includes('yourdomain.com') ||
+          parsed.n8nWebhookUrl.includes('angoori.app.n8n.cloud')
+        ) {
+          parsed.n8nWebhookUrl = CONNECTED_N8N_WEBHOOK_URL;
+        }
+        return parsed;
+      } catch {
+        return initialSettings;
+      }
+    }
+    return initialSettings;
   });
 
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -323,7 +396,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         recordTitle,
         oldValue,
         newValue,
-        ipAddress: '127.0.0.1',
+        ipAddress: typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'client-session',
         timestamp: new Date().toISOString(),
       };
       setActivityLogs((prev) => [newLog, ...prev]);
@@ -331,85 +404,145 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [currentOrg.id, currentUser]
   );
 
-  // Helper to trigger n8n webhook when an event occurs
+  // Helper to trigger n8n webhook when an event occurs with complete payload
   const dispatchWebhookEvent = useCallback(
-    async (event: AutomationRule['triggerEvent'], payload: Record<string, any>, customRuleName?: string) => {
-      const activeRule = automations.find((r) => r.isEnabled && r.triggerEvent === event);
-      if (!activeRule && !settings.n8nEnabled) return;
+    async (event: AutomationRule['triggerEvent'] | string, rawPayload: Record<string, any>, customRuleName?: string) => {
+      const matchingRules = automations.filter((r) => r.isEnabled && r.triggerEvent === event);
+      // If no matching rules but global settings.n8nEnabled is true, dispatch once
+      const rulesToExecute = matchingRules.length > 0 ? matchingRules : (settings.n8nEnabled ? [null] : []);
+      if (rulesToExecute.length === 0) return;
 
-      const targetUrl = activeRule?.targetWebhookUrl || settings.n8nWebhookUrl;
-      const apiKey = activeRule?.apiKey || settings.n8nApiKey;
-      const authType = activeRule?.authType || settings.n8nAuthType;
-      const ruleName = customRuleName || activeRule?.name || `Webhook Event: ${event}`;
+      for (const activeRule of rulesToExecute) {
+        const targetUrl = activeRule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+        const apiKey = activeRule?.apiKey || settings.n8nApiKey;
+        const authType = activeRule?.authType || settings.n8nAuthType;
+        const ruleName = customRuleName || activeRule?.name || `Webhook Event: ${event}`;
 
-      try {
-        const res = await fetch('/api/webhooks/n8n/trigger', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            webhookUrl: targetUrl,
-            apiKey,
-            authType,
-            event,
-            payload,
-          }),
+        // Build standardized, rich payload with email, contactNumber, whatsappMessage, bodyMessage, emailSubject, emailBody
+        const completePayload = buildWebhookPayload(event as string, rawPayload, {
+          organizationName: currentOrg.name,
+          organizationId: currentOrg.id,
+          organizationEmail: currentOrg.email,
+          organizationPhone: currentOrg.phone,
+          triggeredByName: currentUser?.displayName || 'Administrator',
+          triggeredByEmail: currentUser?.email || 'automation@apexsolutions.in',
+          targetWebhookUrl: targetUrl,
         });
 
-        const data = await res.json();
-        const logEntry: AutomationLog = {
-          id: `log_${Date.now()}`,
-          organizationId: currentOrg.id,
-          ruleId: activeRule?.id,
-          automationName: ruleName,
-          triggerEvent: event,
-          status: data.success ? 'Success' : 'Failed',
-          timestamp: new Date().toISOString(),
-          durationMs: data.durationMs || 150,
-          httpStatus: data.statusCode || (data.success ? 200 : 500),
-          payload,
-          responseMessage: data.response ? JSON.stringify(data.response) : (data.success ? 'Executed' : undefined),
-          errorMessage: data.error,
-          retryCount: 0,
-        };
+        const startTime = Date.now();
+        try {
+          const res = await fetch('/api/webhooks/n8n/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              webhookUrl: targetUrl,
+              apiKey,
+              authType,
+              event,
+              payload: completePayload,
+            }),
+          });
 
-        setAutomationLogs((prev) => [logEntry, ...prev]);
+          let data: any = {};
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            data = await res.json();
+          } else {
+            const text = await res.text();
+            data = {
+              success: res.ok,
+              statusCode: res.status,
+              durationMs: Date.now() - startTime,
+              response: text.slice(0, 500),
+              error: res.ok ? undefined : `Non-JSON server response (HTTP ${res.status})`,
+            };
+          }
 
-        // Update counts on rule
-        if (activeRule) {
-          setAutomations((prev) =>
-            prev.map((r) =>
-              r.id === activeRule.id
-                ? {
-                    ...r,
-                    lastRun: new Date().toISOString(),
-                    successCount: data.success ? r.successCount + 1 : r.successCount,
-                    failureCount: !data.success ? r.failureCount + 1 : r.failureCount,
-                  }
-                : r
-            )
-          );
-        }
-
-        // Trigger notification on failure
-        if (!data.success) {
-          const failureNotif: AppNotification = {
-            id: `notif_${Date.now()}`,
+          const logEntry: AutomationLog = {
+            id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             organizationId: currentOrg.id,
-            title: `Automation Failed: ${ruleName}`,
-            message: data.error || 'Webhook execution failed',
-            type: 'automation_failure',
-            referenceId: logEntry.id,
-            referenceType: 'automation',
-            isRead: false,
-            createdAt: new Date().toISOString(),
+            ruleId: activeRule?.id,
+            automationName: ruleName,
+            triggerEvent: event as any,
+            status: data.success ? 'Success' : 'Failed',
+            timestamp: new Date().toISOString(),
+            durationMs: data.durationMs || Date.now() - startTime,
+            httpStatus: data.statusCode || (data.success ? 200 : res.status || 500),
+            payload: completePayload,
+            targetWebhookUrl: targetUrl,
+            diagnosticHint: data.diagnosticHint,
+            n8nHint: data.n8nHint,
+            responseMessage: data.response
+              ? typeof data.response === 'string'
+                ? data.response
+                : JSON.stringify(data.response)
+              : data.success
+              ? 'Delivered to n8n successfully'
+              : undefined,
+            errorMessage: data.error,
+            retryCount: 0,
           };
-          setNotifications((prev) => [failureNotif, ...prev]);
+
+          setAutomationLogs((prev) => [logEntry, ...prev]);
+
+          // Update counts on rule
+          if (activeRule) {
+            setAutomations((prev) =>
+              prev.map((r) =>
+                r.id === activeRule.id
+                  ? {
+                      ...r,
+                      lastRun: new Date().toISOString(),
+                      successCount: data.success ? r.successCount + 1 : r.successCount,
+                      failureCount: !data.success ? r.failureCount + 1 : r.failureCount,
+                    }
+                  : r
+              )
+            );
+          }
+
+          // Trigger notification on failure
+          if (!data.success) {
+            const isInactive =
+              data.statusCode === 404 ||
+              (data.error && data.error.includes('Inactive')) ||
+              (data.diagnosticHint && data.diagnosticHint.includes('Inactive'));
+            const failureNotif: AppNotification = {
+              id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              organizationId: currentOrg.id,
+              title: isInactive ? 'n8n Workflow Needs Activation' : `Automation Failed: ${ruleName}`,
+              message: isInactive
+                ? 'Your n8n workflow is currently INACTIVE in n8n cloud. Toggle it to "Active" in the top-right of your n8n canvas to receive live events.'
+                : data.error || 'Webhook execution failed',
+              type: 'automation_failure',
+              referenceId: logEntry.id,
+              referenceType: 'automation',
+              isRead: false,
+              createdAt: new Date().toISOString(),
+            };
+            setNotifications((prev) => [failureNotif, ...prev]);
+          }
+        } catch (err: any) {
+          console.warn('Could not dispatch webhook:', err);
+          const errorLog: AutomationLog = {
+            id: `log_err_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            organizationId: currentOrg.id,
+            ruleId: activeRule?.id,
+            automationName: ruleName,
+            triggerEvent: event as any,
+            status: 'Failed',
+            timestamp: new Date().toISOString(),
+            durationMs: Date.now() - startTime,
+            httpStatus: 500,
+            payload: completePayload,
+            errorMessage: err.message || 'Network error during dispatch',
+            retryCount: 0,
+          };
+          setAutomationLogs((prev) => [errorLog, ...prev]);
         }
-      } catch (err: any) {
-        console.warn('Could not dispatch webhook:', err);
       }
     },
-    [automations, settings, currentOrg.id]
+    [automations, settings, currentOrg, currentUser]
   );
 
   // Switch role helper for instant RBAC demo testing
@@ -436,14 +569,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCustomers((prev) => [newCustomer, ...prev]);
       logActivity('create', 'customers', newCustomer.id, newCustomer.fullName, undefined, 'Added customer record');
 
-      // Dispatch webhook
+      // Dispatch webhook with complete customer contact details
       dispatchWebhookEvent('new_customer', {
         customerId: newCustomer.customerId,
-        name: newCustomer.fullName,
+        customerName: newCustomer.fullName,
+        fullName: newCustomer.fullName,
         company: newCustomer.companyName,
-        mobile: newCustomer.mobileNumber,
+        companyName: newCustomer.companyName,
         email: newCustomer.email,
+        contactNumber: newCustomer.whatsappNumber || newCustomer.mobileNumber,
+        phone: newCustomer.whatsappNumber || newCustomer.mobileNumber,
+        whatsappNumber: newCustomer.whatsappNumber || newCustomer.mobileNumber,
+        address: `${newCustomer.address}, ${newCustomer.city}, ${newCustomer.state} - ${newCustomer.pinCode}`,
+        category: newCustomer.category,
+        tier: newCustomer.category,
+        industry: newCustomer.industry,
+        source: newCustomer.source,
         assignedTo: newCustomer.assignedEmployeeName,
+        assignedEmployeeName: newCustomer.assignedEmployeeName,
       });
 
       return newCustomer;
@@ -523,15 +666,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
-      // Webhook
+      // Webhook with complete prospect details
       dispatchWebhookEvent('new_lead', {
         leadId: newLead.leadId,
         customerName: newLead.customerName,
         company: newLead.company,
+        companyName: newLead.company,
+        email: newLead.email,
+        contactNumber: newLead.mobile || newLead.mobileNumber,
+        phone: newLead.mobile || newLead.mobileNumber,
+        whatsappNumber: newLead.mobile || newLead.mobileNumber,
         requirement: newLead.requirement,
         value: newLead.estimatedValue,
+        estimatedValue: newLead.estimatedValue,
         status: newLead.status,
+        priority: newLead.priority,
+        source: newLead.source,
         assignedTo: newLead.assignedToName,
+        assignedToName: newLead.assignedToName,
       });
 
       return newLead;
@@ -569,9 +721,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           leadId: target.leadId,
           customerName: target.customerName,
           company: target.company,
+          companyName: target.company,
+          email: target.email,
+          contactNumber: target.mobile || target.mobileNumber,
+          phone: target.mobile || target.mobileNumber,
+          whatsappNumber: target.mobile || target.mobileNumber,
           oldStage,
           newStage: stage,
           value: target.estimatedValue,
+          estimatedValue: target.estimatedValue,
+          priority: target.priority,
+          assignedTo: target.assignedToName,
         });
       }
     },
@@ -618,19 +778,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
-      // Webhook
+      // Webhook with complete ticket & contact details
+      const matchedCustomer = customers.find(
+        (c) => (newTicket.customerId && c.id === newTicket.customerId) || c.fullName === newTicket.customerName
+      );
+      const contactNumber = newTicket.customerPhone || matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || '+91 98201 94821';
+      const email = matchedCustomer?.email || 'rajesh.mehra@mehra-logistics.com';
+      const company = matchedCustomer?.companyName || 'Corporate Client';
+
       dispatchWebhookEvent('new_complaint', {
         ticketNumber: newTicket.ticketNumber,
-        customer: newTicket.customerName,
+        customerName: newTicket.customerName,
+        company,
+        companyName: company,
+        email,
+        contactNumber,
+        phone: contactNumber,
+        whatsappNumber: contactNumber,
         type: newTicket.complaintType,
+        complaintType: newTicket.complaintType,
+        description: newTicket.description,
         priority: newTicket.priority,
         slaHours: newTicket.slaHours,
         assignedTo: newTicket.assignedEmployeeName,
+        assignedEmployeeName: newTicket.assignedEmployeeName,
       });
 
       return newTicket;
     },
-    [currentOrg.id, logActivity, dispatchWebhookEvent]
+    [currentOrg.id, customers, logActivity, dispatchWebhookEvent]
   );
 
   const updateComplaint = useCallback(
@@ -669,16 +845,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
 
       if (target) {
+        const matchedCustomer = customers.find(
+          (c) => (target.customerId && c.id === target.customerId) || c.fullName === target.customerName
+        );
+        const contactNumber = target.customerPhone || matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || '+91 98201 94821';
+        const email = matchedCustomer?.email || 'rajesh.mehra@mehra-logistics.com';
+        const company = matchedCustomer?.companyName || 'Corporate Client';
+
         logActivity('status_change', 'complaints', id, target.ticketNumber, target.status, 'Resolved');
         dispatchWebhookEvent('complaint_resolved', {
           ticketNumber: target.ticketNumber,
-          customer: target.customerName,
+          customerName: target.customerName,
+          company,
+          companyName: company,
+          email,
+          contactNumber,
+          phone: contactNumber,
+          whatsappNumber: contactNumber,
           resolution,
-          rating,
+          rating: rating || 5,
+          complaintType: target.complaintType,
         });
       }
     },
-    [complaints, logActivity, dispatchWebhookEvent]
+    [complaints, customers, logActivity, dispatchWebhookEvent]
   );
 
   // Tasks
@@ -708,17 +898,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
+      const matchedCustomer = customers.find(
+        (c) => (newTask.relatedCustomerId && c.id === newTask.relatedCustomerId) || (newTask.relatedId && c.id === newTask.relatedId)
+      );
+      const contactNumber = matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || '+91 98201 94821';
+      const email = currentUser?.email || 'priya.sharma@apexsolutions.in';
+
       dispatchWebhookEvent('new_task', {
         taskId: newTask.id,
         taskName: newTask.taskName,
+        description: newTask.description,
         assignedTo: newTask.assignedToName,
+        assignedToName: newTask.assignedToName,
         dueDate: newTask.dueDate,
         priority: newTask.priority,
+        customerName: newTask.relatedName || matchedCustomer?.fullName || 'General Operations',
+        company: matchedCustomer?.companyName || currentOrg.name,
+        email,
+        contactNumber,
+        phone: contactNumber,
+        whatsappNumber: contactNumber,
       });
 
       return newTask;
     },
-    [currentOrg.id, logActivity, dispatchWebhookEvent]
+    [currentOrg, currentUser, customers, logActivity, dispatchWebhookEvent]
   );
 
   const updateTask = useCallback(
@@ -813,9 +1017,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
+      // Webhook with complete quotation details
+      dispatchWebhookEvent('quotation_created', {
+        quotationId: newQuote.id,
+        quotationNumber: newQuote.quotationNumber,
+        customerName: newQuote.customerName,
+        company: newQuote.companyName,
+        companyName: newQuote.companyName,
+        email: newQuote.customerEmail,
+        contactNumber: newQuote.customerPhone,
+        phone: newQuote.customerPhone,
+        whatsappNumber: newQuote.customerPhone,
+        grandTotal: newQuote.grandTotal,
+        validUntil: newQuote.validUntil,
+        status: newQuote.status,
+        items: newQuote.items,
+        createdBy: newQuote.createdByName,
+      });
+
       return newQuote;
     },
-    [currentOrg.id, currentUser, quotations.length, logActivity]
+    [currentOrg.id, currentUser, quotations.length, logActivity, dispatchWebhookEvent]
   );
 
   const updateQuotation = useCallback(
@@ -937,9 +1159,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
+      // Webhook for new invoice converted from quotation
+      dispatchWebhookEvent('new_invoice', {
+        invoiceId: newInvoice.id,
+        invoiceNumber: newInvoice.invoiceNumber,
+        quotationNumber: quote.quotationNumber,
+        customerName: newInvoice.customerName,
+        company: newInvoice.companyName,
+        companyName: newInvoice.companyName,
+        email: newInvoice.customerEmail,
+        contactNumber: newInvoice.customerPhone,
+        phone: newInvoice.customerPhone,
+        whatsappNumber: newInvoice.customerPhone,
+        grandTotal: newInvoice.grandTotal,
+        amountPaid: newInvoice.amountPaid,
+        balanceDue: newInvoice.balanceDue,
+        dueDate: newInvoice.dueDate,
+        status: newInvoice.status,
+      });
+
       return newInvoice;
     },
-    [quotations, invoices.length, currentOrg.id, currentUser, logActivity]
+    [quotations, invoices.length, currentOrg.id, currentUser, logActivity, dispatchWebhookEvent]
   );
 
   // Invoices Management
@@ -994,9 +1235,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setNotifications((prev) => [notif, ...prev]);
 
+      // Dispatch webhook for newly created invoice
+      dispatchWebhookEvent('new_invoice', {
+        invoiceId: newInvoice.id,
+        invoiceNumber: newInvoice.invoiceNumber,
+        customerName: newInvoice.customerName,
+        company: newInvoice.companyName,
+        companyName: newInvoice.companyName,
+        email: newInvoice.customerEmail,
+        contactNumber: newInvoice.customerPhone,
+        phone: newInvoice.customerPhone,
+        whatsappNumber: newInvoice.customerPhone,
+        grandTotal: newInvoice.grandTotal,
+        amountPaid: newInvoice.amountPaid,
+        balanceDue: newInvoice.balanceDue,
+        dueDate: newInvoice.dueDate,
+        status: newInvoice.status,
+        items: newInvoice.items,
+      });
+
       return newInvoice;
     },
-    [invoices.length, currentOrg.id, currentUser, logActivity]
+    [invoices.length, currentOrg.id, currentUser, logActivity, dispatchWebhookEvent]
   );
 
   const updateInvoice = useCallback(
@@ -1114,8 +1374,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: new Date().toISOString(),
       };
       setNotifications((prev) => [notif, ...prev]);
+
+      // Dispatch webhook for payment received
+      dispatchWebhookEvent('payment_received', {
+        invoiceId: target.id,
+        invoiceNumber: target.invoiceNumber,
+        customerName: target.customerName,
+        company: target.companyName,
+        companyName: target.companyName,
+        email: target.customerEmail,
+        contactNumber: target.customerPhone,
+        phone: target.customerPhone,
+        whatsappNumber: target.customerPhone,
+        amountPaid: amount,
+        grandTotal: target.grandTotal,
+        balanceRemaining: newBalanceDue,
+        balanceDue: newBalanceDue,
+        paymentMethod: paymentMethod || 'Bank Transfer / NEFT',
+        paymentReference: reference || 'N/A',
+        status: newStatus,
+      });
     },
-    [invoices, currentOrg.id, logActivity]
+    [invoices, currentOrg.id, logActivity, dispatchWebhookEvent]
   );
 
   // Documents
@@ -1131,16 +1411,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setDocuments((prev) => [newDoc, ...prev]);
       logActivity('create', 'documents', newDoc.id, newDoc.name, undefined, `Uploaded ${newDoc.category} document`);
 
+      const contactNumber = '+91 98201 94821';
+      const email = currentUser?.email || 'admin@apexsolutions.in';
+
       dispatchWebhookEvent('document_uploaded', {
         documentId: newDoc.id,
         name: newDoc.name,
         category: newDoc.category,
         uploadedBy: newDoc.uploadedByName,
+        customerName: newDoc.customerName || 'Document Repository',
+        company: currentOrg.name,
+        companyName: currentOrg.name,
+        email,
+        contactNumber,
+        phone: contactNumber,
+        whatsappNumber: contactNumber,
+        fileSize: newDoc.fileSize,
       });
 
       return newDoc;
     },
-    [currentOrg.id, logActivity, dispatchWebhookEvent]
+    [currentOrg, currentUser, logActivity, dispatchWebhookEvent]
   );
 
   const deleteDocument = useCallback(
@@ -1174,8 +1465,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         undefined,
         `Dispatched ${newComm.channel.toUpperCase()} message: ${newComm.templateName || 'Direct Message'}`
       );
+
+      const matchedCustomer = customers.find((c) => c.id === newComm.customerId);
+      const contactNumber =
+        newComm.channel === 'whatsapp'
+          ? newComm.recipient || matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || '+91 98201 94821'
+          : matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || '+91 98201 94821';
+      const email =
+        newComm.channel === 'email'
+          ? newComm.recipient || matchedCustomer?.email || 'customer@example.com'
+          : matchedCustomer?.email || 'customer@example.com';
+
+      // Dispatch webhook for communication
+      dispatchWebhookEvent('new_communication', {
+        communicationId: newComm.id,
+        channel: newComm.channel,
+        customerName: newComm.customerName,
+        company: matchedCustomer?.companyName || 'Valued Client',
+        companyName: matchedCustomer?.companyName || 'Valued Client',
+        recipient: newComm.recipient,
+        email,
+        contactNumber,
+        phone: contactNumber,
+        whatsappNumber: contactNumber,
+        subject: newComm.subject,
+        message: newComm.message,
+        bodyMessage: newComm.message,
+        templateName: newComm.templateName,
+      });
     },
-    [currentOrg.id, logActivity]
+    [currentOrg.id, customers, logActivity, dispatchWebhookEvent]
   );
 
   // Settings & Profile
@@ -1255,14 +1574,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const triggerAutomationRule = useCallback(
     async (ruleId: string, customPayload?: Record<string, any>) => {
       const rule = automations.find((r) => r.id === ruleId);
-      const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl;
-      const payload = customPayload || {
+      const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+      const event = rule?.triggerEvent || 'manual_test';
+
+      const sampleCustomer = customers[0];
+      const sampleLead = leads[0];
+
+      // Build context-aware test payload if customPayload is not supplied
+      const rawPayload = customPayload || {
         testId: `test_${Date.now()}`,
         ruleName: rule?.name || 'Manual Test Trigger',
-        triggeredBy: currentUser?.displayName,
-        sampleCustomer: customers[0]?.fullName,
-        sampleLead: leads[0]?.customerName,
+        customerName: sampleCustomer?.fullName || sampleLead?.customerName || 'Vikram Singhania',
+        company: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
+        companyName: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
+        contactNumber: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
+        phone: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
+        whatsappNumber: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
+        email: sampleCustomer?.email || sampleLead?.email || 'vikram@singhanialogistics.com',
+        requirement: 'Automated CRM integration & WhatsApp webhook pipeline testing',
+        value: 125000,
+        estimatedValue: 125000,
+        ticketNumber: 'TKT-8901',
+        complaintType: 'Service Delivery',
+        priority: 'High',
+        slaHours: 24,
+        taskName: 'Review n8n webhook workflow execution and customer notification',
+        dueDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+        invoiceNumber: 'INV-2026-108',
+        grandTotal: 147500,
+        amountPaid: 50000,
+        balanceDue: 97500,
+        triggeredBy: currentUser?.displayName || 'Administrator',
       };
+
+      const completePayload = buildWebhookPayload(event, rawPayload, {
+        organizationName: currentOrg.name,
+        organizationId: currentOrg.id,
+        organizationEmail: currentOrg.email,
+        organizationPhone: currentOrg.phone,
+        triggeredByName: currentUser?.displayName || 'Administrator',
+        triggeredByEmail: currentUser?.email || 'automation@apexsolutions.in',
+        targetWebhookUrl: targetUrl,
+      });
 
       const startTime = Date.now();
       try {
@@ -1273,25 +1626,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             webhookUrl: targetUrl,
             apiKey: rule?.apiKey || settings.n8nApiKey,
             authType: rule?.authType || settings.n8nAuthType,
-            event: rule?.triggerEvent || 'manual_test',
-            payload,
+            event,
+            payload: completePayload,
           }),
         });
 
-        const data = await res.json();
+        let data: any = {};
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const text = await res.text();
+          data = {
+            success: res.ok,
+            statusCode: res.status,
+            durationMs: Date.now() - startTime,
+            response: text.slice(0, 500),
+            error: res.ok ? undefined : `Non-JSON server response (HTTP ${res.status})`,
+          };
+        }
         const durationMs = data.durationMs || Date.now() - startTime;
         const logEntry: AutomationLog = {
           id: `log_manual_${Date.now()}`,
           organizationId: currentOrg.id,
           ruleId: rule?.id,
           automationName: rule?.name || 'Manual Webhook Test',
-          triggerEvent: rule?.triggerEvent || 'manual_test',
+          triggerEvent: event as any,
           status: data.success ? 'Success' : 'Failed',
           timestamp: new Date().toISOString(),
           durationMs,
           httpStatus: data.statusCode || (data.success ? 200 : 502),
-          payload,
-          responseMessage: data.response ? JSON.stringify(data.response) : (data.success ? 'Webhook executed successfully' : undefined),
+          payload: completePayload,
+          targetWebhookUrl: targetUrl,
+          diagnosticHint: data.diagnosticHint,
+          n8nHint: data.n8nHint,
+          responseMessage: data.response
+            ? typeof data.response === 'string'
+              ? data.response
+              : JSON.stringify(data.response)
+            : data.success
+            ? 'Webhook executed successfully'
+            : undefined,
           errorMessage: data.error,
           retryCount: 0,
         };
@@ -1320,12 +1695,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           organizationId: currentOrg.id,
           ruleId: rule?.id,
           automationName: rule?.name || 'Manual Test',
-          triggerEvent: rule?.triggerEvent || 'manual_test',
+          triggerEvent: event as any,
           status: 'Failed',
           timestamp: new Date().toISOString(),
           durationMs: Date.now() - startTime,
           httpStatus: 500,
-          payload,
+          payload: completePayload,
           errorMessage: err.message,
           retryCount: 0,
         };
@@ -1333,7 +1708,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return errorLog;
       }
     },
-    [automations, settings, currentOrg.id, currentUser, customers, leads]
+    [automations, settings, currentOrg, currentUser, customers, leads]
   );
 
   const retryAutomationLog = useCallback(
@@ -1342,7 +1717,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!log) return;
 
       const rule = automations.find((r) => r.id === log.ruleId);
-      const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl;
+      const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
 
       try {
         const res = await fetch('/api/webhooks/n8n/trigger', {
@@ -1365,7 +1740,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   ...l,
                   status: data.success ? 'Success' : 'Failed',
                   httpStatus: data.statusCode || (data.success ? 200 : 500),
-                  responseMessage: data.response ? JSON.stringify(data.response) : (data.success ? 'Retried successfully' : undefined),
+                  responseMessage: data.response
+                    ? typeof data.response === 'string'
+                      ? data.response
+                      : JSON.stringify(data.response)
+                    : data.success
+                    ? 'Retried successfully'
+                    : undefined,
                   errorMessage: data.error,
                   retryCount: l.retryCount + 1,
                   timestamp: new Date().toISOString(),
@@ -1390,6 +1771,182 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     },
     [automationLogs, automations, settings]
+  );
+
+  // Live direct test to connected n8n webhook
+  const testLiveWebhook = useCallback(
+    async (customEvent?: string, customData?: Record<string, any>) => {
+      const targetUrl = settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+      const eventName = customEvent || 'webhook_test_ping';
+      const activeLeadsCount = leads.filter((l) => l.status !== 'Won' && l.status !== 'Lost').length;
+      const pendingInvoices = invoices.filter((i) => i.status !== 'Paid' && i.status !== 'Cancelled');
+      const totalPendingBalance = pendingInvoices.reduce((sum, i) => sum + (i.balanceDue || 0), 0);
+      const totalRevenueCollected = invoices.reduce((sum, i) => sum + (i.amountPaid || 0), 0);
+
+      const sampleCustomer = customers[0];
+
+      const rawPayload = {
+        event: eventName,
+        source: 'Smart Business Automation Hub',
+        timestamp: new Date().toISOString(),
+        organization: currentOrg.name,
+        organizationId: currentOrg.id,
+        triggeredBy: currentUser?.displayName || 'Administrator',
+        userEmail: currentUser?.email || 'automation@apexsolutions.in',
+        customerName: sampleCustomer?.fullName || 'Vikram Singhania',
+        company: sampleCustomer?.companyName || 'Singhania Logistics Ltd',
+        companyName: sampleCustomer?.companyName || 'Singhania Logistics Ltd',
+        email: sampleCustomer?.email || 'vikram@singhanialogistics.com',
+        contactNumber: sampleCustomer?.whatsappNumber || '+91 98201 94821',
+        phone: sampleCustomer?.whatsappNumber || '+91 98201 94821',
+        whatsappNumber: sampleCustomer?.whatsappNumber || '+91 98201 94821',
+        metrics: {
+          activeLeadsCount,
+          pendingInvoicesCount: pendingInvoices.length,
+          totalPendingBalance,
+          totalRevenueCollected,
+          currency: 'INR',
+        },
+        webhookEndpoint: targetUrl,
+        ...customData,
+      };
+
+      const completePayload = buildWebhookPayload(eventName, rawPayload, {
+        organizationName: currentOrg.name,
+        organizationId: currentOrg.id,
+        organizationEmail: currentOrg.email,
+        organizationPhone: currentOrg.phone,
+        triggeredByName: currentUser?.displayName || 'Administrator',
+        triggeredByEmail: currentUser?.email || 'automation@apexsolutions.in',
+        targetWebhookUrl: targetUrl,
+      });
+
+      const startTime = Date.now();
+      try {
+        const res = await fetch('/api/webhooks/n8n/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            webhookUrl: targetUrl,
+            apiKey: settings.n8nApiKey,
+            authType: settings.n8nAuthType,
+            event: eventName,
+            payload: completePayload,
+          }),
+        });
+
+        let data: any = {};
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const text = await res.text();
+          data = {
+            success: res.ok,
+            statusCode: res.status,
+            durationMs: Date.now() - startTime,
+            response: text.slice(0, 500),
+            error: res.ok ? undefined : `Non-JSON server response (HTTP ${res.status})`,
+          };
+        }
+        const durationMs = data.durationMs || Date.now() - startTime;
+
+        const logEntry: AutomationLog = {
+          id: `log_live_${Date.now()}`,
+          organizationId: currentOrg.id,
+          automationName: 'Connected n8n Webhook Ping',
+          triggerEvent: eventName as any,
+          status: data.success ? 'Success' : 'Failed',
+          timestamp: new Date().toISOString(),
+          durationMs,
+          httpStatus: data.statusCode || (data.success ? 200 : 502),
+          payload: completePayload,
+          targetWebhookUrl: targetUrl,
+          diagnosticHint: data.diagnosticHint,
+          n8nHint: data.n8nHint,
+          responseMessage: data.response
+            ? typeof data.response === 'string'
+              ? data.response
+              : JSON.stringify(data.response)
+            : data.success
+            ? 'Delivered to n8n webhook successfully'
+            : undefined,
+          errorMessage: data.error,
+          retryCount: 0,
+        };
+
+        setAutomationLogs((prev) => [logEntry, ...prev]);
+
+        return {
+          success: Boolean(data.success),
+          message: data.success
+            ? `Successfully delivered payload to ${targetUrl}`
+            : data.error || 'Failed to dispatch to n8n webhook',
+          diagnosticHint: data.diagnosticHint,
+          n8nHint: data.n8nHint,
+          statusCode: data.statusCode,
+          durationMs,
+        };
+      } catch (err: any) {
+        const durationMs = Date.now() - startTime;
+        return {
+          success: false,
+          message: err.message || 'Network error triggering webhook',
+          durationMs,
+        };
+      }
+    },
+    [leads, invoices, currentOrg, currentUser, customers, settings]
+  );
+
+  // Switch between Production and Test webhook URLs in 1 click
+  const switchWebhookMode = useCallback(
+    async (mode: 'production' | 'test') => {
+      const currentUrl = settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+      let newUrl = currentUrl;
+      if (mode === 'test' && currentUrl.includes('/webhook/')) {
+        newUrl = currentUrl.replace('/webhook/', '/webhook-test/');
+      } else if (mode === 'production' && currentUrl.includes('/webhook-test/')) {
+        newUrl = currentUrl.replace('/webhook-test/', '/webhook/');
+      }
+
+      await updateSettings({ n8nWebhookUrl: newUrl });
+      setAutomations((prev) =>
+        prev.map((rule) => {
+          let ruleUrl = rule.targetWebhookUrl || newUrl;
+          if (mode === 'test' && ruleUrl.includes('/webhook/')) {
+            ruleUrl = ruleUrl.replace('/webhook/', '/webhook-test/');
+          } else if (mode === 'production' && ruleUrl.includes('/webhook-test/')) {
+            ruleUrl = ruleUrl.replace('/webhook-test/', '/webhook/');
+          }
+          return { ...rule, targetWebhookUrl: ruleUrl };
+        })
+      );
+    },
+    [settings.n8nWebhookUrl, updateSettings]
+  );
+
+  // Run full connectivity diagnostic on n8n
+  const runWebhookDiagnostics = useCallback(
+    async (customUrl?: string) => {
+      const url = customUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
+      try {
+        const res = await fetch('/api/webhooks/n8n/diagnose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ webhookUrl: url }),
+        });
+        const data = await res.json();
+        return data;
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err.message,
+          recommendedAction: 'Could not communicate with local backend proxy.',
+        };
+      }
+    },
+    [settings.n8nWebhookUrl]
   );
 
   // Notifications
@@ -1492,6 +2049,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       toggleAutomationRule,
       triggerAutomationRule,
       retryAutomationLog,
+      testLiveWebhook,
+      switchWebhookMode,
+      runWebhookDiagnostics,
+      dispatchWebhookEvent,
+      logActivity,
+      updateOrganization: updateBusinessProfile,
+      resetSeedData: resetToSampleData,
       markNotificationAsRead,
       markAllNotificationsAsRead,
       resetToSampleData,
@@ -1551,6 +2115,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       toggleAutomationRule,
       triggerAutomationRule,
       retryAutomationLog,
+      testLiveWebhook,
+      switchWebhookMode,
+      runWebhookDiagnostics,
+      dispatchWebhookEvent,
+      logActivity,
       markNotificationAsRead,
       markAllNotificationsAsRead,
       resetToSampleData,

@@ -213,14 +213,38 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
+    // Normalize payload to guarantee email, contactNumber for WhatsApp, and body messages
+    const normalizedPayload = {
+      event: event || 'custom_event',
+      timestamp: new Date().toISOString(),
+      source: 'Smart Business Automation Hub',
+      email: payload?.email || payload?.emailAddress || payload?.customerEmail || 'contact@apexsolutions.in',
+      contactNumber: payload?.contactNumber || payload?.phone || payload?.whatsappNumber || '+919820194821',
+      phone: payload?.phone || payload?.contactNumber || payload?.whatsappNumber || '+919820194821',
+      whatsappNumber: payload?.whatsappNumber || payload?.contactNumber || payload?.phone || '+919820194821',
+      whatsappMessage:
+        payload?.whatsappMessage ||
+        payload?.bodyMessage ||
+        payload?.message ||
+        `Automated notification from Business Hub for event: ${event}`,
+      bodyMessage:
+        payload?.bodyMessage ||
+        payload?.whatsappMessage ||
+        payload?.message ||
+        `Automated notification from Business Hub for event: ${event}`,
+      emailSubject: payload?.emailSubject || `[Business Hub Notification] ${event}`,
+      emailBody:
+        payload?.emailBody ||
+        payload?.bodyMessage ||
+        payload?.whatsappMessage ||
+        `Automated notification for event: ${event}`,
+      ...payload,
+    };
+
     const webhookResponse = await fetch(webhookUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        event: event || 'custom_event',
-        timestamp: new Date().toISOString(),
-        ...payload,
-      }),
+      body: JSON.stringify(normalizedPayload),
       signal: controller.signal,
     }).finally(() => clearTimeout(timeoutId));
 
@@ -242,12 +266,40 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
         response: responseData,
       });
     } else {
+      let friendlyError = `Webhook returned HTTP ${webhookResponse.status}`;
+      let diagnosticHint: string | undefined;
+      let n8nHint: string | undefined;
+
+      if (responseData && typeof responseData === 'object') {
+        n8nHint = responseData.hint;
+        if (responseData.hint && responseData.hint.includes('workflow must be active')) {
+          friendlyError = 'n8n Workflow is Inactive (HTTP 404)';
+          diagnosticHint =
+            'In n8n (deepika18.app.n8n.cloud), click the toggle switch in the top-right corner from "Inactive" to "Active". Once active, production webhook calls will execute immediately.';
+        } else if (responseData.hint && responseData.hint.includes('Execute workflow')) {
+          friendlyError = 'n8n Test Webhook Waiting (HTTP 404)';
+          diagnosticHint =
+            'In your n8n editor canvas, open the Webhook node and click "Listen for test event" (or "Execute workflow") before firing the test event.';
+        } else if (responseData.message) {
+          friendlyError = responseData.message;
+          diagnosticHint = responseData.hint;
+        }
+      }
+
       return res.json({
         success: false,
         status: 'failed',
         statusCode: webhookResponse.status,
         durationMs,
-        error: `Webhook returned HTTP ${webhookResponse.status}`,
+        error: friendlyError,
+        diagnosticHint,
+        n8nHint,
+        suggestedTestUrl: webhookUrl.includes('/webhook/')
+          ? webhookUrl.replace('/webhook/', '/webhook-test/')
+          : undefined,
+        suggestedProductionUrl: webhookUrl.includes('/webhook-test/')
+          ? webhookUrl.replace('/webhook-test/', '/webhook/')
+          : undefined,
         response: responseData,
       });
     }
@@ -260,6 +312,113 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
       error: err.name === 'AbortError' ? 'Webhook request timed out (8s limit)' : err.message,
     });
   }
+});
+
+// 5.1 n8n Webhook Live Connectivity & Diagnostics Checker
+app.post('/api/webhooks/n8n/diagnose', async (req, res) => {
+  const targetUrl =
+    req.body?.webhookUrl ||
+    'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550';
+
+  let prodUrl = targetUrl;
+  let testUrl = targetUrl;
+
+  if (targetUrl.includes('/webhook-test/')) {
+    prodUrl = targetUrl.replace('/webhook-test/', '/webhook/');
+    testUrl = targetUrl;
+  } else if (targetUrl.includes('/webhook/')) {
+    prodUrl = targetUrl;
+    testUrl = targetUrl.replace('/webhook/', '/webhook-test/');
+  }
+
+  const currentMode = targetUrl.includes('/webhook-test/') ? 'test' : 'production';
+
+  // Helper to probe an n8n webhook endpoint
+  const probeEndpoint = async (url: string) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'SmartBusinessDiagnostics/1.0' },
+        body: JSON.stringify({ probe: true, timestamp: new Date().toISOString() }),
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeoutId));
+
+      const text = await resp.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = text;
+      }
+
+      return {
+        ok: resp.ok,
+        statusCode: resp.status,
+        response: json,
+        hint: json?.hint,
+        message: json?.message || (resp.ok ? 'Endpoint active' : `HTTP ${resp.status}`),
+      };
+    } catch (e: any) {
+      return {
+        ok: false,
+        statusCode: 0,
+        response: null,
+        message: e.name === 'AbortError' ? 'Timed out (4s)' : e.message,
+      };
+    }
+  };
+
+  const [prodResult, testResult] = await Promise.all([
+    probeEndpoint(prodUrl),
+    probeEndpoint(testUrl),
+  ]);
+
+  let isProdActive = prodResult.ok || prodResult.statusCode === 200 || prodResult.statusCode === 201 || prodResult.statusCode === 204;
+  let isTestListening = testResult.ok || testResult.statusCode === 200 || testResult.statusCode === 201 || testResult.statusCode === 204;
+
+  let recommendedAction = '';
+  if (isProdActive) {
+    recommendedAction = 'Your production n8n webhook is ACTIVE and receiving payloads properly!';
+  } else if (prodResult.hint && prodResult.hint.includes('workflow must be active')) {
+    recommendedAction =
+      'Your n8n workflow is currently INACTIVE. Go to your n8n workflow editor canvas (deepika18.app.n8n.cloud) and click the toggle switch in the top-right corner to change from "Inactive" to "Active".';
+  } else if (isTestListening) {
+    recommendedAction =
+      'Your n8n canvas is actively listening on the Test URL! Switch the app to Test Mode to send events right now.';
+  } else {
+    recommendedAction =
+      'Workflow is currently inactive or not listening. Turn the workflow to "Active" in n8n for production, or click "Listen for test event" on the canvas to test.';
+  }
+
+  return res.json({
+    success: true,
+    currentUrl: targetUrl,
+    currentMode,
+    production: {
+      url: prodUrl,
+      isActive: isProdActive,
+      statusCode: prodResult.statusCode,
+      message: prodResult.message,
+      hint: prodResult.hint,
+    },
+    test: {
+      url: testUrl,
+      isListening: isTestListening,
+      statusCode: testResult.statusCode,
+      message: testResult.message,
+      hint: testResult.hint,
+    },
+    recommendedAction,
+    solutionSteps: [
+      '1. Open your n8n workspace at https://deepika18.app.n8n.cloud in another browser tab',
+      '2. Open the workflow with webhook ID 89951fe9-c292-49f2-a872-176bda893550',
+      '3. Locate the toggle switch in the top-right corner of the editor canvas',
+      '4. Flip the switch from "Inactive" (grey) to "Active" (green)',
+      '5. Save the workflow (Ctrl+S / Cmd+S). Now production events will execute smoothly!',
+    ],
+  });
 });
 
 // 6. Incoming Webhook Receiver from n8n

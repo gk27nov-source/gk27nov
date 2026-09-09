@@ -1,5 +1,6 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
+import { useInventory } from '../../context/InventoryContext';
 import {
   LayoutDashboard,
   Users,
@@ -17,6 +18,7 @@ import {
   X,
   Zap,
   Receipt,
+  Boxes,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -53,6 +55,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, onCloseMobile })
   const activeAutomationsCount = automations.filter((a) => a.isEnabled).length;
   const pendingInvoicesCount = invoices.filter((inv) => inv.status !== 'Paid' && inv.status !== 'Cancelled').length;
 
+  const { products } = useInventory();
+  const lowStockCount = products.filter((p) => p.currentStock <= p.reorderLevel).length;
+
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'customers', label: 'Customers', icon: Users },
@@ -69,6 +74,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, onCloseMobile })
       icon: Receipt,
       badge: pendingInvoicesCount > 0 ? `${pendingInvoicesCount} Due` : undefined,
       badgeColor: 'bg-blue-100 text-blue-800 font-semibold',
+    },
+    {
+      id: 'inventory',
+      label: 'Inventory & Store',
+      icon: Boxes,
+      badge: lowStockCount > 0 ? `${lowStockCount} Low` : undefined,
+      badgeColor: 'bg-amber-100 text-amber-800 font-semibold',
     },
     {
       id: 'complaints',

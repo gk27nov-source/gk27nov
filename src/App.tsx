@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { InventoryProvider } from './context/InventoryContext';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar } from './components/layout/Sidebar';
 import { AuthModal } from './components/auth/AuthModal';
@@ -17,6 +18,7 @@ import { EmployeesView } from './components/employees/EmployeesView';
 import { SettingsView } from './components/settings/SettingsView';
 import { NotificationsView } from './components/notifications/NotificationsView';
 import { InvoicesQuotesView } from './components/invoices/InvoicesQuotesView';
+import { InventoryModule } from './components/inventory/InventoryModule';
 
 const MainLayout: React.FC = () => {
   const { activeTab, currentUser } = useApp();
@@ -35,6 +37,8 @@ const MainLayout: React.FC = () => {
       case 'invoices':
       case 'quotations':
         return <InvoicesQuotesView />;
+      case 'inventory':
+        return <InventoryModule />;
       case 'complaints':
         return <ComplaintsView />;
       case 'tasks':
@@ -95,7 +99,9 @@ const MainLayout: React.FC = () => {
 export default function App() {
   return (
     <AppProvider>
-      <MainLayout />
+      <InventoryProvider>
+        <MainLayout />
+      </InventoryProvider>
     </AppProvider>
   );
 }
