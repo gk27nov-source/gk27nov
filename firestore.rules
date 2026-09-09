@@ -1,0 +1,248 @@
+rules_version = '2';
+
+// Smart Business Automation Hub — Firestore security rules
+//
+// WHAT CHANGED FROM THE PREVIOUS VERSION, AND WHY
+//
+// 1. Role and organizationId now come from CUSTOM CLAIMS on the ID token,
+//    not from a users/{uid} document.
+//
+//    The previous rules read them via get(/documents/users/$(uid)).data, while
+//    also allowing `update: if request.auth.uid == userId` on that same
+//    document. So any signed-in user could write {role: 'super_admin'} to
+//    their own profile and isSuperAdmin() would then return true everywhere.
+//    That is a full privilege escalation, reachable by anyone who can sign up.
+//
+//    Claims are signed by Firebase and cannot be written from the client. Set
+//    them with scripts/set-claims.mjs.
+//
+// 2. No get() inside rules. Every rule evaluation used to perform a document
+//    read: slower, billed, and it failed shut if the users doc was missing —
+//    which is one reason the app saw permission-denied and silently fell back
+//    to localStorage.
+//
+// 3. Collections are matched explicitly rather than through one wildcard, and
+//    financial records are protected from deletion by ordinary staff.
+//
+// Layout: FLAT top-level collections, each document carrying organizationId.
+// That matches what the client actually does (collection(db, 'products') with
+// where('organizationId', '==', orgId)).
+//
+// Roles, lowest to highest: viewer < staff < manager < business_admin < super_admin
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function claimOrg() {
+      return signedIn() ? request.auth.token.get('organizationId', '') : '';
+    }
+
+    function claimRole() {
+      return signedIn() ? request.auth.token.get('role', '') : '';
+    }
+
+    function rank(role) {
+      return role == 'super_admin' ? 4
+           : role == 'business_admin' ? 3
+           : role == 'manager' ? 2
+           : role == 'staff' ? 1
+           : role == 'viewer' ? 0
+           : -1;
+    }
+
+    function atLeast(role) {
+      return signedIn() && rank(claimRole()) >= rank(role);
+    }
+
+    // super_admin is a platform role and may cross organisations. Every other
+    // role is confined to the organisation named in its own token.
+    function canReachOrg(orgId) {
+      return signedIn() && (claimRole() == 'super_admin' || claimOrg() == orgId);
+    }
+
+    // A document belongs to the caller's organisation.
+    function ownsExisting() {
+      return resource != null && canReachOrg(resource.data.organizationId);
+    }
+
+    // An incoming document must be stamped with the caller's own organisation,
+    // so a member cannot plant a record inside someone else's tenant.
+    function stampsOwnOrg() {
+      return request.resource.data.organizationId == claimOrg()
+             || claimRole() == 'super_admin';
+    }
+
+    // organizationId is immutable once written.
+    function keepsOrg() {
+      return request.resource.data.organizationId == resource.data.organizationId;
+    }
+
+    // ---------------------------------------------------------------
+    // Organisations
+    // ---------------------------------------------------------------
+    match /organizations/{orgId} {
+      allow get, list: if canReachOrg(orgId);
+      // Creating a tenant is an administrative act, not something a new
+      // sign-up performs for itself. Previously: `allow create: if
+      // isAuthenticated()`.
+      allow create, update: if canReachOrg(orgId) && atLeast('business_admin');
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // User profiles
+    //
+    // Readable within the organisation. A user may maintain their own display
+    // details, but NOT role or organizationId — those live in claims, and
+    // letting the client write them here is the hole this replaces.
+    // ---------------------------------------------------------------
+    match /users/{userId} {
+      allow get, list: if signedIn() && (
+        request.auth.uid == userId || ownsExisting()
+      );
+
+      allow create: if atLeast('business_admin') && stampsOwnOrg();
+
+      allow update: if signedIn() && ownsExisting() && keepsOrg() && (
+        atLeast('business_admin')
+        || (
+          request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['displayName', 'photoURL', 'phone', 'mobile', 'lastLogin'])
+        )
+      );
+
+      allow delete: if atLeast('business_admin') && ownsExisting();
+    }
+
+    // ---------------------------------------------------------------
+    // Automation configuration — decides who gets messaged, and where the
+    // webhook points. Admin-only writes.
+    // ---------------------------------------------------------------
+    match /automations/{docId} {
+      allow get, list: if ownsExisting();
+      allow create: if atLeast('business_admin') && stampsOwnOrg();
+      allow update: if atLeast('business_admin') && ownsExisting() && keepsOrg();
+      allow delete: if atLeast('business_admin') && ownsExisting();
+    }
+
+    match /settings/{docId} {
+      /*
+        Read is keyed on the PATH, not on the stored document.
+
+        `ownsExisting()` requires resource != null, which is right for
+        collections but wrong here: this document is addressed directly by the
+        organisation id, and the client reads it before it exists in order to
+        discover that it needs seeding. With ownsExisting() that first read is
+        denied, the listener errors, and settings can never bootstrap — the app
+        reports itself offline forever on a fresh project.
+
+        `canReachOrg(docId)` answers the same question without needing the
+        document: docId IS the organisation id, so nobody learns anything about
+        an organisation they could not already address.
+      */
+      allow get: if canReachOrg(docId);
+      allow list: if ownsExisting();
+      allow create: if atLeast('business_admin') && stampsOwnOrg();
+      allow update: if atLeast('business_admin') && ownsExisting() && keepsOrg();
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // Audit surfaces. Written by the server only, so an entry cannot be
+    // forged or erased from a browser. Previously any non-viewer could
+    // create, update AND delete automationLogs and activityLogs.
+    // ---------------------------------------------------------------
+    // APPEND-ONLY, not server-only.
+    //
+    // These were `allow write: if false`, which is the right end state — logs
+    // should be written by the backend so they cannot be touched at all. But
+    // the client is what records them today (recordDispatchOutcome and
+    // logActivity in AppContext), so a blanket denial would simply lose every
+    // entry.
+    //
+    // Append-only is the honest middle: an entry can be created, and then
+    // never altered or deleted by anyone. That is the property that actually
+    // matters for an audit trail, and it is a real tightening — previously any
+    // non-viewer could create, UPDATE and DELETE these freely.
+    //
+    // Move creation to the server when the backend gains Firestore access, and
+    // set create back to false.
+    // Read is org-wide, not manager-only: the client subscribes to this
+    // collection for every signed-in user (the Automation Center shows the
+    // dispatch log), and a denied subscription would report the whole app as
+    // offline to staff.
+    match /automationLogs/{docId} {
+      allow get, list: if ownsExisting();
+      allow create: if atLeast('staff') && stampsOwnOrg();
+      allow update, delete: if false;
+    }
+
+    match /activityLogs/{docId} {
+      allow get, list: if ownsExisting();
+      allow create: if atLeast('staff') && stampsOwnOrg();
+      allow update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // Notifications: members read, and may only flip their read state.
+    // ---------------------------------------------------------------
+    match /notifications/{docId} {
+      allow get, list: if ownsExisting();
+      // Any member can raise one: a failed dispatch notifies as whoever
+      // triggered the event, which is frequently a staff account.
+      allow create: if atLeast('staff') && stampsOwnOrg();
+      allow update: if ownsExisting() && keepsOrg() && (
+        atLeast('manager')
+        || request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['isRead', 'readAt'])
+      );
+      allow delete: if atLeast('business_admin') && ownsExisting();
+    }
+
+    // ---------------------------------------------------------------
+    // Financial records. An issued invoice should not be removable by a staff
+    // account, and a paid one not at all.
+    // ---------------------------------------------------------------
+    match /invoices/{docId} {
+      allow get, list: if ownsExisting();
+      allow create: if atLeast('staff') && stampsOwnOrg();
+      allow update: if atLeast('staff') && ownsExisting() && keepsOrg();
+      allow delete: if atLeast('business_admin') && ownsExisting()
+                    && resource.data.get('amountPaid', 0) == 0;
+    }
+
+    match /quotations/{docId} {
+      allow get, list: if ownsExisting();
+      allow create: if atLeast('staff') && stampsOwnOrg();
+      allow update: if atLeast('staff') && ownsExisting() && keepsOrg();
+      allow delete: if atLeast('manager') && ownsExisting();
+    }
+
+    // ---------------------------------------------------------------
+    // Everyday operational modules. Viewers read; staff and above write.
+    // ---------------------------------------------------------------
+    match /{module}/{docId} {
+      function isOperationalModule() {
+        return module in [
+          'customers', 'leads', 'complaints', 'tasks', 'documents',
+          'communications',
+          'products', 'categories', 'stores', 'suppliers',
+          'stockTransactions', 'stockTransfers', 'purchaseOrders',
+          'goodsReceipts', 'stockReservations', 'stockAudits',
+          'stockAdjustments'
+        ];
+      }
+
+      allow get, list: if isOperationalModule() && ownsExisting();
+      allow create: if isOperationalModule() && atLeast('staff') && stampsOwnOrg();
+      allow update: if isOperationalModule() && atLeast('staff')
+                    && ownsExisting() && keepsOrg();
+      allow delete: if isOperationalModule() && atLeast('manager') && ownsExisting();
+    }
+  }
+}

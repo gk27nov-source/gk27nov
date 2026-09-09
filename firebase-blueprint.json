@@ -1,0 +1,117 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Product catalog and inventory master record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "sku": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "subcategory": { "type": "string" },
+        "brand": { "type": "string" },
+        "description": { "type": "string" },
+        "unit": { "type": "string" },
+        "barcode": { "type": "string" },
+        "hsnCode": { "type": "string" },
+        "gstRate": { "type": "number" },
+        "purchasePrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "minStockLevel": { "type": "number" },
+        "maxStockLevel": { "type": "number" },
+        "reorderLevel": { "type": "number" },
+        "openingStock": { "type": "number" },
+        "currentStock": { "type": "number" },
+        "reservedStock": { "type": "number" },
+        "availableStock": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "sku", "name", "currentStock"]
+    },
+    "StockTransaction": {
+      "title": "StockTransaction",
+      "description": "Immutable stock ledger journal entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "transactionNumber": { "type": "string" },
+        "type": { "type": "string" },
+        "productId": { "type": "string" },
+        "productName": { "type": "string" },
+        "sku": { "type": "string" },
+        "quantity": { "type": "number" },
+        "direction": { "type": "string", "enum": ["in", "out"] },
+        "unit": { "type": "string" },
+        "unitPrice": { "type": "number" },
+        "totalValue": { "type": "number" },
+        "sourceStoreId": { "type": "string" },
+        "destinationStoreId": { "type": "string" },
+        "referenceType": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "remarks": { "type": "string" },
+        "previousStock": { "type": "number" },
+        "newStock": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "transactionNumber", "productId", "quantity", "direction", "newStock", "timestamp"]
+    },
+    "WarehouseStore": {
+      "title": "WarehouseStore",
+      "description": "Physical warehouse or store facility",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "storeCode": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "managerName": { "type": "string" },
+        "isMainStore": { "type": "boolean" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["id", "organizationId", "storeCode", "name"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Vendor / Supplier profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "supplierCode": { "type": "string" },
+        "name": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "organizationId", "supplierCode", "name"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Product catalog and multi-store inventory balances"
+    },
+    "/stockTransactions/{txnId}": {
+      "schema": "StockTransaction",
+      "description": "Immutable historical stock transaction journal"
+    },
+    "/stores/{storeId}": {
+      "schema": "WarehouseStore",
+      "description": "Warehouse and store location records"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "Supplier",
+      "description": "Vendor and supplier profiles"
+    }
+  }
+}
