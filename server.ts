@@ -8,6 +8,32 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+// Configurable default n8n webhook URL helper (overridable via N8N_WEBHOOK_BASE_URL environment variable)
+export function normalizeWebhookUrl(url?: string): string {
+  const fallback = 'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550';
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return fallback;
+  }
+  let clean = url.trim();
+  if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+    clean = `https://${clean}`;
+  }
+  try {
+    const parsed = new URL(clean);
+    if (!parsed.pathname || parsed.pathname === '/') {
+      return `${parsed.origin}/webhook/89951fe9-c292-49f2-a872-176bda893550`;
+    }
+    return clean;
+  } catch {
+    return fallback;
+  }
+}
+
+const DEFAULT_N8N_WEBHOOK_URL = normalizeWebhookUrl(
+  process.env.N8N_WEBHOOK_BASE_URL ||
+  'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550'
+);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -27,6 +53,8 @@ app.get('/api/health', (req, res) => {
     appName: 'Smart Business Automation Hub',
     timestamp: new Date().toISOString(),
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    n8nConfigured: Boolean(process.env.N8N_WEBHOOK_BASE_URL || DEFAULT_N8N_WEBHOOK_URL),
+    environment: process.env.NODE_ENV || 'development',
   });
 });
 
@@ -184,15 +212,36 @@ Provide:
 app.post('/api/webhooks/n8n/trigger', async (req, res) => {
   const startTime = Date.now();
   const { webhookUrl, apiKey, authType, event, payload } = req.body;
+  const rawUrl = webhookUrl ? String(webhookUrl).trim() : '';
 
-  if (!webhookUrl) {
+  // STEP 3: Strict Validation Check - DO NOT HIDE ERRORS
+  if (
+    !rawUrl ||
+    rawUrl === 'undefined' ||
+    rawUrl === 'null' ||
+    rawUrl.includes('localhost') ||
+    rawUrl.includes('127.0.0.1') ||
+    rawUrl.includes('/webhook-test/')
+  ) {
+    let problem = 'Webhook URL is undefined, null, or empty.';
+    if (rawUrl.includes('/webhook-test/')) {
+      problem = `Webhook URL "${rawUrl}" contains "/webhook-test/". Production n8n workflows require "/webhook/".`;
+    } else if (rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')) {
+      problem = `Webhook URL "${rawUrl}" points to localhost/127.0.0.1 which cannot be reached from the cloud container.`;
+    }
+
+    console.error("n8n Webhook Error:", problem);
     return res.status(400).json({
       success: false,
       status: 'failed',
-      message: 'Webhook URL is required.',
+      statusCode: 400,
+      error: problem,
+      diagnosticHint: 'Configure a valid production n8n webhook URL. Do not use test endpoints or localhost.',
       durationMs: 0,
     });
   }
+
+  const targetWebhookUrl = normalizeWebhookUrl(rawUrl);
 
   try {
     const headers: Record<string, string> = {
@@ -213,11 +262,12 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    // Normalize payload to guarantee email, contactNumber for WhatsApp, and body messages
+    // Normalize payload to guarantee event, source, timestamp, data, email, contactNumber for WhatsApp, and body messages
     const normalizedPayload = {
       event: event || 'custom_event',
-      timestamp: new Date().toISOString(),
-      source: 'Smart Business Automation Hub',
+      source: payload?.source || 'smart-business-automation-hub',
+      timestamp: payload?.timestamp || new Date().toISOString(),
+      data: payload?.data || { ...payload },
       email: payload?.email || payload?.emailAddress || payload?.customerEmail || 'contact@apexsolutions.in',
       contactNumber: payload?.contactNumber || payload?.phone || payload?.whatsappNumber || '+919820194821',
       phone: payload?.phone || payload?.contactNumber || payload?.whatsappNumber || '+919820194821',
@@ -241,7 +291,15 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
       ...payload,
     };
 
-    const webhookResponse = await fetch(webhookUrl, {
+    // STEP 2: Temporary Diagnostic Logs immediately before sending webhook
+    console.log("AUTOMATION DEBUG [SERVER]");
+    console.log("Event:", event);
+    console.log("Workflow:", payload?.ruleName || event);
+    console.log("Webhook URL:", targetWebhookUrl);
+    console.log("HTTP Method:", "POST");
+    console.log("Payload:", normalizedPayload);
+
+    const webhookResponse = await fetch(targetWebhookUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(normalizedPayload),
@@ -256,6 +314,9 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
     } catch {
       responseData = responseText;
     }
+
+    console.log("n8n Status:", webhookResponse.status);
+    console.log("n8n Response:", responseData);
 
     if (webhookResponse.ok) {
       return res.json({
@@ -294,11 +355,11 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
         error: friendlyError,
         diagnosticHint,
         n8nHint,
-        suggestedTestUrl: webhookUrl.includes('/webhook/')
-          ? webhookUrl.replace('/webhook/', '/webhook-test/')
+        suggestedTestUrl: targetWebhookUrl.includes('/webhook/')
+          ? targetWebhookUrl.replace('/webhook/', '/webhook-test/')
           : undefined,
-        suggestedProductionUrl: webhookUrl.includes('/webhook-test/')
-          ? webhookUrl.replace('/webhook-test/', '/webhook/')
+        suggestedProductionUrl: targetWebhookUrl.includes('/webhook-test/')
+          ? targetWebhookUrl.replace('/webhook-test/', '/webhook/')
           : undefined,
         response: responseData,
       });
@@ -316,9 +377,7 @@ app.post('/api/webhooks/n8n/trigger', async (req, res) => {
 
 // 5.1 n8n Webhook Live Connectivity & Diagnostics Checker
 app.post('/api/webhooks/n8n/diagnose', async (req, res) => {
-  const targetUrl =
-    req.body?.webhookUrl ||
-    'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550';
+  const targetUrl = normalizeWebhookUrl(req.body?.webhookUrl || DEFAULT_N8N_WEBHOOK_URL);
 
   let prodUrl = targetUrl;
   let testUrl = targetUrl;

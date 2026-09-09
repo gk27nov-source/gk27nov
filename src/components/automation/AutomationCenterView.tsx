@@ -23,11 +23,13 @@ import {
   RotateCw,
 } from 'lucide-react';
 import { CONNECTED_N8N_WEBHOOK_URL } from '../../data/seedData';
+import { N8N_WEBHOOK_PROD_URL, N8N_WEBHOOK_TEST_URL } from '../../config/appConfig';
 
 export const AutomationCenterView: React.FC = () => {
   const {
     automations,
     toggleAutomationRule,
+    updateAutomationRule,
     automationLogs,
     triggerAutomationRule,
     testLiveWebhook,
@@ -53,6 +55,19 @@ export const AutomationCenterView: React.FC = () => {
     n8nHint?: string;
     statusCode?: number;
   } | null>(null);
+
+  // STEP 6: Temporary Debug Info for Test Trigger
+  const [testTriggerDebug, setTestTriggerDebug] = useState<{
+    event: string;
+    webhookUrl: string;
+    httpStatus: number | string;
+    response: string;
+    error: string;
+  } | null>(null);
+
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+  const [ruleWebhookUrls, setRuleWebhookUrls] = useState<Record<string, string>>({});
+  const [retryWebhookUrl, setRetryWebhookUrl] = useState<string>('');
 
   // Settings state for n8n Webhook configuration
   const currentTargetUrl = settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
@@ -128,10 +143,41 @@ export const AutomationCenterView: React.FC = () => {
 
   // Test live webhook trigger on a specific rule
   const handleTestTrigger = async (rule: AutomationRule) => {
+    if (!rule.isEnabled) {
+      setPingResult({
+        success: false,
+        message: `Rule "${rule.name}" is currently disabled. Toggle the switch to Enabled to allow webhook execution.`,
+        diagnosticHint: 'The blue toggle switch on each automation card controls whether events dispatch webhooks.',
+        statusCode: 403,
+      });
+      setTestTriggerDebug({
+        event: rule.triggerEvent,
+        webhookUrl: rule.targetWebhookUrl || currentTargetUrl,
+        httpStatus: 403,
+        response: 'None (Request Blocked: Rule Disabled)',
+        error: `Rule "${rule.name}" is disabled. Toggle switch to Enabled.`,
+      });
+      return;
+    }
+
     setTestingRuleId(rule.id);
     try {
       const log = await triggerAutomationRule(rule.id);
-      if (log.status === 'Failed') {
+      const targetUrl = log.targetWebhookUrl || rule.targetWebhookUrl || currentTargetUrl;
+      const respStr = log.responseMessage
+        ? (typeof log.responseMessage === 'object' ? JSON.stringify(log.responseMessage, null, 2) : String(log.responseMessage))
+        : (log.status === 'Success' ? 'HTTP 200 OK - Workflow triggered' : JSON.stringify(log.payload, null, 2));
+      const errStr = log.errorMessage || (log.status === 'Success' ? 'None' : 'Failed to dispatch to n8n');
+
+      setTestTriggerDebug({
+        event: log.triggerEvent || rule.triggerEvent,
+        webhookUrl: targetUrl,
+        httpStatus: log.httpStatus || (log.status === 'Success' ? 200 : 500),
+        response: respStr,
+        error: errStr,
+      });
+
+      if (log.status === 'Failed' || log.status === 'Blocked') {
         setPingResult({
           success: false,
           message: log.errorMessage || `Rule "${rule.name}" failed to dispatch to n8n`,
@@ -146,6 +192,13 @@ export const AutomationCenterView: React.FC = () => {
         });
       }
     } catch (e: any) {
+      setTestTriggerDebug({
+        event: rule.triggerEvent,
+        webhookUrl: rule.targetWebhookUrl || currentTargetUrl,
+        httpStatus: 500,
+        response: 'None',
+        error: e.message || 'Trigger failed',
+      });
       setPingResult({
         success: false,
         message: e.message || 'Trigger failed',
@@ -492,77 +545,274 @@ export const AutomationCenterView: React.FC = () => {
           </span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {automations.map((rule) => (
-            <div
-              key={rule.id}
-              className={`p-5 bg-white rounded-2xl border transition-all flex flex-col justify-between space-y-4 ${
-                rule.isEnabled
-                  ? 'border-slate-200 shadow-xs hover:border-indigo-300'
-                  : 'border-slate-200/60 opacity-70 bg-slate-50/50'
-              }`}
-            >
-              <div>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-                    <Cpu className="w-5 h-5" />
-                  </div>
+        {/* STEP 6: Temporary Debug Info Display for Test Trigger */}
+        {testTriggerDebug && (
+          <div
+            id="diagnostic-test-trigger-panel"
+            className="mb-4 p-4 bg-slate-900 text-slate-100 rounded-2xl border-2 border-indigo-500 shadow-xl font-mono text-xs space-y-3"
+          >
+            <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+              <div className="flex items-center gap-2 font-bold text-indigo-400 text-xs">
+                <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>DIAGNOSTIC MODE — TEST TRIGGER DEBUG INFO</span>
+              </div>
+              <button
+                onClick={() => setTestTriggerDebug(null)}
+                className="text-slate-400 hover:text-white text-[11px] underline cursor-pointer"
+              >
+                Clear Debug Info
+              </button>
+            </div>
 
-                  {/* Enable / Disable Toggle */}
-                  <button
-                    onClick={() => toggleAutomationRule(rule.id)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      rule.isEnabled ? 'bg-indigo-600' : 'bg-slate-300'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                        rule.isEnabled ? 'translate-x-5' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                <h3 className="font-bold text-sm text-slate-900 mt-3">{rule.name}</h3>
-                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{rule.description}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                <span className="text-slate-400 text-[10px] uppercase font-bold block mb-0.5">Event:</span>
+                <span className="text-emerald-400 font-bold text-sm">{testTriggerDebug.event}</span>
               </div>
 
-              <div className="space-y-3 pt-3 border-t border-slate-100 text-xs">
-                <div className="flex items-center justify-between text-slate-500">
-                  <span className="font-medium">Trigger Event:</span>
-                  <span className="font-mono text-[11px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-semibold">
-                    {rule.triggerEvent}
-                  </span>
-                </div>
+              <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                <span className="text-slate-400 text-[10px] uppercase font-bold block mb-0.5">HTTP status:</span>
+                <span
+                  className={`font-bold text-sm ${
+                    testTriggerDebug.httpStatus === 200 || testTriggerDebug.httpStatus === '200'
+                      ? 'text-emerald-400'
+                      : 'text-rose-400'
+                  }`}
+                >
+                  {testTriggerDebug.httpStatus}
+                </span>
+              </div>
 
-                <div className="flex items-center justify-between text-slate-500">
-                  <span className="font-medium">Runs / Success:</span>
-                  <span className="font-semibold text-slate-700">
-                    {rule.executionCount ?? (rule.successCount + rule.failureCount)} runs ({rule.successCount} ok)
-                  </span>
-                </div>
+              <div className="md:col-span-2 bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                <span className="text-slate-400 text-[10px] uppercase font-bold block mb-0.5">Webhook URL:</span>
+                <span className="text-cyan-300 break-all select-all font-mono text-xs">
+                  {testTriggerDebug.webhookUrl}
+                </span>
+              </div>
 
-                <div className="flex items-center justify-between pt-1">
-                  <span className="text-[10px] text-slate-400">
-                    Last run:{' '}
-                    {new Date(rule.lastRun || rule.lastTriggeredAt || new Date().toISOString()).toLocaleTimeString(
-                      [],
-                      { hour: '2-digit', minute: '2-digit' }
-                    )}
-                  </span>
+              <div className="md:col-span-2 bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                <span className="text-slate-400 text-[10px] uppercase font-bold block mb-0.5">Response:</span>
+                <pre className="mt-1 p-2 bg-slate-950 text-amber-300 rounded text-[11px] font-mono overflow-x-auto max-h-36 whitespace-pre-wrap">
+                  {testTriggerDebug.response}
+                </pre>
+              </div>
 
-                  <button
-                    onClick={() => handleTestTrigger(rule)}
-                    disabled={testingRuleId === rule.id}
-                    className="px-2.5 py-1 text-[11px] font-bold bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 rounded-lg transition-colors flex items-center gap-1 shadow-2xs disabled:opacity-50"
-                  >
-                    <Play className={`w-3 h-3 ${testingRuleId === rule.id ? 'animate-spin' : ''}`} />
-                    <span>{testingRuleId === rule.id ? 'Firing...' : 'Test Trigger'}</span>
-                  </button>
-                </div>
+              <div className="md:col-span-2 bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/60">
+                <span className="text-slate-400 text-[10px] uppercase font-bold block mb-0.5">Error:</span>
+                <span
+                  className={
+                    testTriggerDebug.error === 'None'
+                      ? 'text-slate-400 font-sans text-xs'
+                      : 'text-rose-400 font-bold font-sans text-xs'
+                  }
+                >
+                  {testTriggerDebug.error}
+                </span>
               </div>
             </div>
-          ))}
+
+            {/* n8n Workflow Inactive / 404 Resolution Assistant */}
+            {(testTriggerDebug.httpStatus === 404 ||
+              testTriggerDebug.httpStatus === '404' ||
+              testTriggerDebug.response.includes('not registered') ||
+              testTriggerDebug.response.includes('workflow must be active') ||
+              testTriggerDebug.error.includes('404')) && (
+              <div className="p-3 bg-amber-950/70 border border-amber-500/60 rounded-xl space-y-2.5 mt-2 font-sans">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Root Cause: n8n Workflow Inactive (HTTP 404)</span>
+                  </div>
+                  <a
+                    href="https://deepika18.app.n8n.cloud"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-300 bg-indigo-900/60 hover:bg-indigo-800/80 px-2 py-0.5 rounded border border-indigo-700 transition-colors"
+                  >
+                    <span>Open n8n Editor</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+
+                <div className="text-[11px] text-slate-200 space-y-1">
+                  <p>
+                    The n8n webhook returned <code className="text-rose-300 bg-black/40 px-1 py-0.5 rounded font-mono">404 Webhook not registered</code> because production webhook endpoints are disabled when a workflow is <strong>Inactive</strong>.
+                  </p>
+                  <p className="font-semibold text-amber-200">
+                    Fix in 2 steps:
+                  </p>
+                  <ol className="list-decimal list-inside pl-1 text-[11px] text-slate-300 space-y-0.5">
+                    <li>Open your workflow in <a href="https://deepika18.app.n8n.cloud" target="_blank" rel="noreferrer" className="text-indigo-300 underline font-medium">deepika18.app.n8n.cloud</a> and switch the toggle at top-right to <strong>Active</strong> (green).</li>
+                    <li>If you created a new workflow or a new Webhook node, paste its Production Webhook URL below:</li>
+                  </ol>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                  <input
+                    type="url"
+                    value={retryWebhookUrl || testTriggerDebug.webhookUrl}
+                    onChange={(e) => setRetryWebhookUrl(e.target.value)}
+                    placeholder="https://deepika18.app.n8n.cloud/webhook/..."
+                    className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={async () => {
+                      const finalUrl = (retryWebhookUrl || testTriggerDebug.webhookUrl).trim();
+                      if (!finalUrl) return;
+                      await updateSettings({ n8nWebhookUrl: finalUrl });
+                      const matchedRule = automations.find((r) => r.triggerEvent === testTriggerDebug.event) || automations[0];
+                      if (matchedRule) {
+                        await updateAutomationRule(matchedRule.id, { targetWebhookUrl: finalUrl });
+                        handleTestTrigger({ ...matchedRule, targetWebhookUrl: finalUrl });
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0 shadow-sm cursor-pointer"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    <span>Save & Retry Trigger</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {automations.map((rule) => {
+            const ruleUrl = rule.targetWebhookUrl || currentTargetUrl;
+            const isEditingThisRule = editingRuleId === rule.id;
+
+            return (
+              <div
+                key={rule.id}
+                className={`p-5 bg-white rounded-2xl border transition-all flex flex-col justify-between space-y-4 ${
+                  rule.isEnabled
+                    ? 'border-slate-200 shadow-xs hover:border-indigo-300'
+                    : 'border-slate-200/60 opacity-70 bg-slate-50/50'
+                }`}
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                      <Cpu className="w-5 h-5" />
+                    </div>
+
+                    {/* Enable / Disable Toggle */}
+                    <button
+                      onClick={() => toggleAutomationRule(rule.id)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        rule.isEnabled ? 'bg-indigo-600' : 'bg-slate-300'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                          rule.isEnabled ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <h3 className="font-bold text-sm text-slate-900 mt-3">{rule.name}</h3>
+                  <p className="text-xs text-slate-500 mt-1 line-clamp-2">{rule.description}</p>
+                </div>
+
+                <div className="space-y-2.5 pt-3 border-t border-slate-100 text-xs">
+                  <div className="flex items-center justify-between text-slate-500">
+                    <span className="font-medium">Trigger Event:</span>
+                    <span className="font-mono text-[11px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-semibold">
+                      {rule.triggerEvent}
+                    </span>
+                  </div>
+
+                  {/* Webhook Endpoint Display & Inline Editor */}
+                  <div className="pt-1 text-slate-500">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-medium text-[11px] text-slate-600">Webhook Endpoint:</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isEditingThisRule) {
+                            setEditingRuleId(null);
+                          } else {
+                            setEditingRuleId(rule.id);
+                            if (!ruleWebhookUrls[rule.id]) {
+                              setRuleWebhookUrls((prev) => ({
+                                ...prev,
+                                [rule.id]: ruleUrl,
+                              }));
+                            }
+                          }
+                        }}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold underline cursor-pointer"
+                      >
+                        {isEditingThisRule ? 'Cancel' : 'Edit URL'}
+                      </button>
+                    </div>
+
+                    {isEditingThisRule ? (
+                      <div className="flex gap-1.5 mt-1">
+                        <input
+                          type="url"
+                          value={ruleWebhookUrls[rule.id] ?? ruleUrl}
+                          onChange={(e) =>
+                            setRuleWebhookUrls((prev) => ({ ...prev, [rule.id]: e.target.value }))
+                          }
+                          className="flex-1 px-2 py-1 text-[11px] border border-slate-300 rounded font-mono text-slate-800 focus:outline-indigo-500"
+                          placeholder="https://deepika18.app.n8n.cloud/webhook/..."
+                        />
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const newUrl = ruleWebhookUrls[rule.id]?.trim();
+                            if (newUrl) {
+                              await updateAutomationRule(rule.id, { targetWebhookUrl: newUrl });
+                            }
+                            setEditingRuleId(null);
+                          }}
+                          className="px-2 py-1 text-[10px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded cursor-pointer"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        className="text-[10px] font-mono text-slate-600 truncate block bg-slate-50 px-2 py-1 rounded border border-slate-200/70"
+                        title={ruleUrl}
+                      >
+                        {ruleUrl}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between text-slate-500">
+                    <span className="font-medium">Runs / Success:</span>
+                    <span className="font-semibold text-slate-700">
+                      {rule.executionCount ?? (rule.successCount + rule.failureCount)} runs ({rule.successCount} ok)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[10px] text-slate-400">
+                      Last run:{' '}
+                      {new Date(rule.lastRun || rule.lastTriggeredAt || new Date().toISOString()).toLocaleTimeString(
+                        [],
+                        { hour: '2-digit', minute: '2-digit' }
+                      )}
+                    </span>
+
+                    <button
+                      onClick={() => handleTestTrigger(rule)}
+                      disabled={testingRuleId === rule.id}
+                      className="px-2.5 py-1 text-[11px] font-bold bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 rounded-lg transition-colors flex items-center gap-1 shadow-2xs disabled:opacity-50 cursor-pointer"
+                    >
+                      <Play className={`w-3 h-3 ${testingRuleId === rule.id ? 'animate-spin' : ''}`} />
+                      <span>{testingRuleId === rule.id ? 'Firing...' : 'Test Trigger'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -624,6 +874,8 @@ export const AutomationCenterView: React.FC = () => {
                           className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
                             log.status === 'Success'
                               ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : log.status === 'Blocked'
+                              ? 'bg-slate-100 text-slate-700 border border-slate-300'
                               : isInactiveError
                               ? 'bg-amber-50 text-amber-800 border border-amber-200'
                               : 'bg-red-50 text-red-700 border border-red-200'
@@ -631,6 +883,8 @@ export const AutomationCenterView: React.FC = () => {
                         >
                           {log.status === 'Success' ? (
                             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          ) : log.status === 'Blocked' ? (
+                            <AlertCircle className="w-3 h-3 text-slate-500" />
                           ) : isInactiveError ? (
                             <AlertTriangle className="w-3 h-3 text-amber-600" />
                           ) : (
@@ -638,6 +892,8 @@ export const AutomationCenterView: React.FC = () => {
                           )}
                           {log.status === 'Success'
                             ? 'Delivered (200)'
+                            : log.status === 'Blocked'
+                            ? 'Blocked (Disabled)'
                             : isInactiveError
                             ? 'n8n Inactive (404)'
                             : `Failed (${log.httpStatus || 500})`}
@@ -844,7 +1100,7 @@ export const AutomationCenterView: React.FC = () => {
                 <input
                   type="url"
                   required
-                  placeholder="https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550"
+                  placeholder={N8N_WEBHOOK_PROD_URL}
                   value={n8nWebhookUrl}
                   onChange={(e) => setN8nWebhookUrl(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -852,11 +1108,7 @@ export const AutomationCenterView: React.FC = () => {
                 <div className="flex items-center gap-2 mt-1.5">
                   <button
                     type="button"
-                    onClick={() =>
-                      setN8nWebhookUrl(
-                        'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550'
-                      )
-                    }
+                    onClick={() => setN8nWebhookUrl(N8N_WEBHOOK_PROD_URL)}
                     className="text-[11px] text-indigo-600 hover:underline font-semibold"
                   >
                     Set Production URL
@@ -864,11 +1116,7 @@ export const AutomationCenterView: React.FC = () => {
                   <span className="text-slate-300">|</span>
                   <button
                     type="button"
-                    onClick={() =>
-                      setN8nWebhookUrl(
-                        'https://deepika18.app.n8n.cloud/webhook-test/89951fe9-c292-49f2-a872-176bda893550'
-                      )
-                    }
+                    onClick={() => setN8nWebhookUrl(N8N_WEBHOOK_TEST_URL)}
                     className="text-[11px] text-indigo-600 hover:underline font-semibold"
                   >
                     Set Test URL

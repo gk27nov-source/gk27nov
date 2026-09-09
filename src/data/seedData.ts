@@ -15,6 +15,7 @@ import {
   Quotation,
   Invoice,
 } from '../types';
+import { DEFAULT_N8N_WEBHOOK_URL } from '../config/appConfig';
 
 export const DEMO_ORG_ID = 'org_smart_hub_01';
 
@@ -919,8 +920,7 @@ export const initialTasks: Task[] = [
   },
 ];
 
-export const CONNECTED_N8N_WEBHOOK_URL =
-  'https://deepika18.app.n8n.cloud/webhook/89951fe9-c292-49f2-a872-176bda893550';
+export const CONNECTED_N8N_WEBHOOK_URL = DEFAULT_N8N_WEBHOOK_URL;
 
 export const initialAutomationRules: AutomationRule[] = [
   {

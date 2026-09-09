@@ -28,6 +28,7 @@ export interface CompleteWebhookPayload {
   organizationId: string;
   triggeredBy: string;
   triggeredByEmail: string;
+  data: Record<string, any>;
 
   // Contact Details for WhatsApp and Email nodes in n8n
   email: string;
@@ -1084,11 +1085,12 @@ export function buildWebhookPayload(
     event,
     eventName: generated.eventName,
     timestamp: new Date().toISOString(),
-    source: 'Smart Business Automation Hub',
+    source: 'smart-business-automation-hub',
     organization: orgName,
     organizationId: orgId,
     triggeredBy: triggeredByName,
     triggeredByEmail: triggeredByEmail,
+    data: { ...entityData },
 
     // Primary Contact Fields for WhatsApp Nodes in n8n
     contactNumber: cleanPhone,

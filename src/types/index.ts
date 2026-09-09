@@ -274,7 +274,7 @@ export interface AutomationLog {
   ruleName?: string;
   automationName: string;
   triggerEvent: string;
-  status: 'Success' | 'Failed' | 'Pending';
+  status: 'Success' | 'Failed' | 'Pending' | 'Blocked';
   timestamp: string;
   durationMs: number;
   executionDurationMs?: number;

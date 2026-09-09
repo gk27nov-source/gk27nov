@@ -130,6 +130,7 @@ interface AppContextType {
   updateEmployee: (uid: string, updates: Partial<UserProfile>) => Promise<void>;
 
   toggleAutomationRule: (ruleId: string) => Promise<void>;
+  updateAutomationRule: (ruleId: string, updates: Partial<AutomationRule>) => Promise<void>;
   triggerAutomationRule: (ruleId: string, customPayload?: Record<string, any>) => Promise<AutomationLog>;
   retryAutomationLog: (logId: string) => Promise<void>;
   testLiveWebhook: (
@@ -146,6 +147,21 @@ interface AppContextType {
   switchWebhookMode: (mode: 'production' | 'test') => Promise<void>;
   runWebhookDiagnostics: (customUrl?: string) => Promise<any>;
   dispatchWebhookEvent: (event: string, entityData: Record<string, any>, customRuleName?: string) => Promise<void>;
+  triggerAutomation: (
+    eventType: string,
+    payload: Record<string, any>,
+    options?: { ruleId?: string; customRuleName?: string; isTestTrigger?: boolean }
+  ) => Promise<{
+    success: boolean;
+    status: 'Success' | 'Failed' | 'Blocked';
+    httpStatus?: number;
+    durationMs: number;
+    log?: AutomationLog;
+    response?: any;
+    errorMessage?: string;
+    diagnosticHint?: string;
+    n8nHint?: string;
+  }>;
   logActivity: (
     action: ActivityLog['action'],
     module: ActivityLog['module'],
@@ -227,28 +243,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (saved) {
       try {
         const parsed: AutomationRule[] = JSON.parse(saved);
-        return parsed.map((rule) => ({
-          ...rule,
-          targetWebhookUrl:
-            !rule.targetWebhookUrl ||
-            rule.targetWebhookUrl.includes('apexsolutions.com') ||
-            rule.targetWebhookUrl.includes('yourdomain.com') ||
-            rule.targetWebhookUrl.includes('angoori.app.n8n.cloud')
-              ? CONNECTED_N8N_WEBHOOK_URL
-              : rule.targetWebhookUrl,
-          triggerEvent:
-            rule.id === 'auto_05' && rule.triggerEvent === 'callback_requested'
-              ? 'invoice_due'
-              : rule.triggerEvent,
-          authType:
-            rule.apiKey && (rule.apiKey.includes('993821049281') || rule.apiKey.includes('sla_alert_token') || rule.apiKey.includes('task_webhook_sec') || rule.apiKey.includes('pay_remind_token') || rule.apiKey.includes('ai_doc_api'))
-              ? 'none'
-              : rule.authType || 'none',
-          apiKey:
-            rule.apiKey && (rule.apiKey.includes('993821049281') || rule.apiKey.includes('sla_alert_token') || rule.apiKey.includes('task_webhook_sec') || rule.apiKey.includes('pay_remind_token') || rule.apiKey.includes('ai_doc_api'))
-              ? ''
-              : rule.apiKey || '',
-        }));
+        return parsed.map((rule) => {
+          let cleanUrl = rule.targetWebhookUrl;
+          if (
+            !cleanUrl ||
+            cleanUrl.includes('apexsolutions.com') ||
+            cleanUrl.includes('yourdomain.com') ||
+            cleanUrl.includes('localhost') ||
+            cleanUrl.includes('127.0.0.1') ||
+            cleanUrl.includes('angoori.app.n8n.cloud')
+          ) {
+            cleanUrl = CONNECTED_N8N_WEBHOOK_URL;
+          }
+
+          let event = rule.triggerEvent;
+          if (rule.id === 'auto_01') event = 'new_lead';
+          else if (rule.id === 'auto_02') event = 'new_customer';
+          else if (rule.id === 'auto_03') event = 'new_complaint';
+          else if (rule.id === 'auto_04') event = 'task_overdue';
+          else if (rule.id === 'auto_05') event = 'invoice_due';
+          else if (rule.id === 'auto_06') event = 'document_uploaded';
+
+          return {
+            ...rule,
+            targetWebhookUrl: cleanUrl,
+            triggerEvent: event,
+            authType: rule.authType || 'none',
+            apiKey: rule.apiKey || '',
+          };
+        });
       } catch {
         return initialAutomationRules;
       }
@@ -280,6 +303,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           !parsed.n8nWebhookUrl ||
           parsed.n8nWebhookUrl.includes('apexsolutions.com') ||
           parsed.n8nWebhookUrl.includes('yourdomain.com') ||
+          parsed.n8nWebhookUrl.includes('localhost') ||
+          parsed.n8nWebhookUrl.includes('127.0.0.1') ||
           parsed.n8nWebhookUrl.includes('angoori.app.n8n.cloud')
         ) {
           parsed.n8nWebhookUrl = CONNECTED_N8N_WEBHOOK_URL;
@@ -404,22 +429,215 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [currentOrg.id, currentUser]
   );
 
-  // Helper to trigger n8n webhook when an event occurs with complete payload
-  const dispatchWebhookEvent = useCallback(
-    async (event: AutomationRule['triggerEvent'] | string, rawPayload: Record<string, any>, customRuleName?: string) => {
-      const matchingRules = automations.filter((r) => r.isEnabled && r.triggerEvent === event);
-      // If no matching rules but global settings.n8nEnabled is true, dispatch once
-      const rulesToExecute = matchingRules.length > 0 ? matchingRules : (settings.n8nEnabled ? [null] : []);
-      if (rulesToExecute.length === 0) return;
+  // Central Reusable Webhook Dispatcher
+  const triggerAutomation = useCallback(
+    async (
+      eventType: string,
+      payload: Record<string, any>,
+      options: { ruleId?: string; customRuleName?: string; isTestTrigger?: boolean } = {}
+    ): Promise<{
+      success: boolean;
+      status: 'Success' | 'Failed' | 'Blocked';
+      httpStatus?: number;
+      durationMs: number;
+      log?: AutomationLog;
+      response?: any;
+      errorMessage?: string;
+      diagnosticHint?: string;
+      n8nHint?: string;
+    }> => {
+      console.log(`[AutomationDispatcher] 🚀 Received Event: "${eventType}" (isTestTrigger: ${!!options.isTestTrigger})`);
+
+      // 1. Event Routing / Alias Normalization to guarantee all 6 workflows match
+      let canonicalEvent = eventType;
+      if (eventType === 'new_task') canonicalEvent = 'task_overdue';
+      if (eventType === 'new_invoice' || eventType === 'payment_reminder') canonicalEvent = 'invoice_due';
+
+      // 2. Identify the matching workflow rule(s)
+      let targetRules: AutomationRule[] = [];
+      if (options.ruleId) {
+        const specificRule = automations.find((r) => r.id === options.ruleId);
+        if (specificRule) targetRules = [specificRule];
+      } else {
+        targetRules = automations.filter(
+          (r) => r.triggerEvent === eventType || r.triggerEvent === canonicalEvent
+        );
+      }
+
+      console.log(
+        `[AutomationDispatcher] 🔍 Matched Workflows for "${canonicalEvent}":`,
+        targetRules.map((r) => `${r.name} (${r.isEnabled ? 'ENABLED' : 'DISABLED'})`)
+      );
+
+      // 3. Workflow Enable / Disable Enforcement
+      if (targetRules.length > 0) {
+        if (options.ruleId) {
+          const rule = targetRules[0];
+          if (!rule.isEnabled) {
+            console.warn(`[AutomationDispatcher] 🛑 Blocked: Workflow "${rule.name}" is disabled.`);
+            const blockedLog: AutomationLog = {
+              id: `log_blocked_${Date.now()}`,
+              organizationId: currentOrg.id,
+              ruleId: rule.id,
+              ruleName: rule.name,
+              automationName: rule.name,
+              triggerEvent: canonicalEvent,
+              status: 'Blocked',
+              timestamp: new Date().toISOString(),
+              durationMs: 0,
+              httpStatus: 403,
+              payload,
+              targetWebhookUrl: settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL,
+              errorMessage: `Workflow "${rule.name}" is currently disabled. Execution was blocked.`,
+              diagnosticHint: 'Toggle the switch to "Enabled" in the Automation Centre to allow webhook execution.',
+              retryCount: 0,
+            };
+            setAutomationLogs((prev) => [blockedLog, ...prev]);
+            return {
+              success: false,
+              status: 'Blocked',
+              httpStatus: 403,
+              durationMs: 0,
+              log: blockedLog,
+              errorMessage: `Workflow "${rule.name}" is currently disabled. Toggle the switch to Enabled to activate webhook dispatches.`,
+              diagnosticHint: 'Toggle the switch to "Enabled" in the Automation Centre.',
+            };
+          }
+        } else {
+          // For real business events: filter to only enabled rules
+          const enabledRules = targetRules.filter((r) => r.isEnabled);
+          if (enabledRules.length === 0) {
+            const disabledRule = targetRules[0];
+            console.warn(`[AutomationDispatcher] 🛑 Real event "${canonicalEvent}" blocked: Workflow "${disabledRule?.name}" is disabled.`);
+            const blockedLog: AutomationLog = {
+              id: `log_blocked_${Date.now()}`,
+              organizationId: currentOrg.id,
+              ruleId: disabledRule?.id,
+              ruleName: disabledRule?.name || `Automation: ${canonicalEvent}`,
+              automationName: disabledRule?.name || `Automation: ${canonicalEvent}`,
+              triggerEvent: canonicalEvent,
+              status: 'Blocked',
+              timestamp: new Date().toISOString(),
+              durationMs: 0,
+              httpStatus: 403,
+              payload,
+              targetWebhookUrl: settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL,
+              errorMessage: `Workflow "${disabledRule?.name || canonicalEvent}" is disabled. Webhook execution blocked.`,
+              diagnosticHint: 'Toggle this automation to "Enabled" in the Automation Centre to process events.',
+              retryCount: 0,
+            };
+            setAutomationLogs((prev) => [blockedLog, ...prev]);
+            return {
+              success: false,
+              status: 'Blocked',
+              httpStatus: 403,
+              durationMs: 0,
+              log: blockedLog,
+              errorMessage: `Workflow "${disabledRule?.name || canonicalEvent}" is currently disabled. Execution blocked.`,
+            };
+          }
+          targetRules = enabledRules;
+        }
+      } else {
+        // No matching workflow configured; check global n8nEnabled
+        if (!settings.n8nEnabled) {
+          console.warn(`[AutomationDispatcher] 🛑 No workflow configured for "${canonicalEvent}" and global n8n is disabled.`);
+          return {
+            success: false,
+            status: 'Blocked',
+            durationMs: 0,
+            errorMessage: `No automation workflow is configured or enabled for event "${canonicalEvent}".`,
+          };
+        }
+      }
+
+      // 4. Determine Rules to execute
+      const rulesToExecute = targetRules.length > 0 ? targetRules : [null];
+      let lastResult = {
+        success: false,
+        status: 'Failed' as 'Success' | 'Failed' | 'Blocked',
+        durationMs: 0,
+        httpStatus: 500,
+        errorMessage: 'Execution failed',
+        diagnosticHint: undefined as string | undefined,
+        n8nHint: undefined as string | undefined,
+        response: undefined as any,
+        log: undefined as AutomationLog | undefined,
+      };
 
       for (const activeRule of rulesToExecute) {
-        const targetUrl = activeRule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
-        const apiKey = activeRule?.apiKey || settings.n8nApiKey;
-        const authType = activeRule?.authType || settings.n8nAuthType;
-        const ruleName = customRuleName || activeRule?.name || `Webhook Event: ${event}`;
+        // 5. Retrieve production n8n webhook URL
+        let targetUrl =
+          activeRule?.targetWebhookUrl &&
+          activeRule.targetWebhookUrl !== CONNECTED_N8N_WEBHOOK_URL &&
+          !activeRule.targetWebhookUrl.includes('apexsolutions.com') &&
+          !activeRule.targetWebhookUrl.includes('yourdomain.com') &&
+          !activeRule.targetWebhookUrl.includes('localhost') &&
+          !activeRule.targetWebhookUrl.includes('127.0.0.1') &&
+          !activeRule.targetWebhookUrl.includes('angoori.app.n8n.cloud')
+            ? activeRule.targetWebhookUrl
+            : settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
 
-        // Build standardized, rich payload with email, contactNumber, whatsappMessage, bodyMessage, emailSubject, emailBody
-        const completePayload = buildWebhookPayload(event as string, rawPayload, {
+        const ruleName = options.customRuleName || activeRule?.name || `Webhook Event: ${canonicalEvent}`;
+        const apiKey = activeRule?.apiKey || settings.n8nApiKey || '';
+        const authType = activeRule?.authType || settings.n8nAuthType || 'none';
+
+        // STEP 3: Strict Validation Check - DO NOT HIDE ERRORS
+        const checkUrl = targetUrl ? String(targetUrl).trim() : '';
+        const isInvalidUrl =
+          !checkUrl ||
+          checkUrl === 'undefined' ||
+          checkUrl === 'null' ||
+          checkUrl.includes('localhost') ||
+          checkUrl.includes('127.0.0.1') ||
+          checkUrl.includes('/webhook-test/');
+
+        if (isInvalidUrl) {
+          let problemReason = 'Webhook URL is undefined, null, or empty.';
+          if (checkUrl.includes('/webhook-test/')) {
+            problemReason = `Webhook URL "${checkUrl}" contains "/webhook-test/". n8n test webhooks only execute for a single manual test when "Listen for test event" is active in n8n. You must configure the production URL containing "/webhook/".`;
+          } else if (checkUrl.includes('localhost') || checkUrl.includes('127.0.0.1')) {
+            problemReason = `Webhook URL "${checkUrl}" points to localhost/127.0.0.1, which cannot be reached from the cloud container.`;
+          }
+
+          console.error('n8n Webhook Error:', problemReason);
+
+          const invalidLog: AutomationLog = {
+            id: `log_invalid_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            organizationId: currentOrg.id,
+            ruleId: activeRule?.id,
+            ruleName,
+            automationName: ruleName,
+            triggerEvent: canonicalEvent,
+            status: 'Failed',
+            timestamp: new Date().toISOString(),
+            durationMs: 0,
+            executionDurationMs: 0,
+            httpStatus: 400,
+            payload,
+            targetWebhookUrl: checkUrl,
+            errorMessage: problemReason,
+            diagnosticHint: 'Correct the webhook endpoint URL in the Automation Centre or Settings. Do not use test endpoints (/webhook-test/) or localhost.',
+            retryCount: 0,
+          };
+          setAutomationLogs((prev) => [invalidLog, ...prev]);
+
+          lastResult = {
+            success: false,
+            status: 'Failed',
+            httpStatus: 400,
+            durationMs: 0,
+            log: invalidLog,
+            errorMessage: problemReason,
+            diagnosticHint: 'Invalid webhook URL configuration.',
+            n8nHint: 'Set production webhook URL without /webhook-test/',
+            response: null,
+          };
+          continue;
+        }
+
+        // 6. Build Payload conforming to requirement: { event, source, timestamp, data, ... }
+        const completePayload = buildWebhookPayload(canonicalEvent, payload, {
           organizationName: currentOrg.name,
           organizationId: currentOrg.id,
           organizationEmail: currentOrg.email,
@@ -429,6 +647,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           targetWebhookUrl: targetUrl,
         });
 
+        // STEP 2: Temporary Diagnostic Logs immediately before sending webhook
+        console.log("AUTOMATION DEBUG");
+        console.log("Event:", canonicalEvent);
+        console.log("Workflow:", ruleName);
+        console.log("Webhook URL:", targetUrl);
+        console.log("HTTP Method:", "POST");
+        console.log("Payload:", completePayload);
+
+        // 7. POST JSON to n8n via server-side proxy
         const startTime = Date.now();
         try {
           const res = await fetch('/api/webhooks/n8n/trigger', {
@@ -438,7 +665,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               webhookUrl: targetUrl,
               apiKey,
               authType,
-              event,
+              event: canonicalEvent,
               payload: completePayload,
             }),
           });
@@ -458,15 +685,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             };
           }
 
+          const durationMs = data.durationMs || Date.now() - startTime;
+          const responseBody = data.response !== undefined ? data.response : data;
+
+          // STEP 2: Log the response and errors
+          console.log("n8n Status:", data.statusCode || res.status);
+          console.log("n8n Response:", responseBody);
+
+          if (!res.ok || !data.success) {
+            console.error("n8n Webhook Error:", data.error || `HTTP ${data.statusCode || res.status}`);
+          }
+
+          // 8. Record in state/audit log
           const logEntry: AutomationLog = {
             id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             organizationId: currentOrg.id,
             ruleId: activeRule?.id,
+            ruleName,
             automationName: ruleName,
-            triggerEvent: event as any,
+            triggerEvent: canonicalEvent,
             status: data.success ? 'Success' : 'Failed',
             timestamp: new Date().toISOString(),
-            durationMs: data.durationMs || Date.now() - startTime,
+            durationMs,
+            executionDurationMs: durationMs,
             httpStatus: data.statusCode || (data.success ? 200 : res.status || 500),
             payload: completePayload,
             targetWebhookUrl: targetUrl,
@@ -485,7 +726,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           setAutomationLogs((prev) => [logEntry, ...prev]);
 
-          // Update counts on rule
+          // Update execution counts and lastRun on rule
           if (activeRule) {
             setAutomations((prev) =>
               prev.map((r) =>
@@ -493,15 +734,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   ? {
                       ...r,
                       lastRun: new Date().toISOString(),
+                      lastTriggeredAt: new Date().toISOString(),
                       successCount: data.success ? r.successCount + 1 : r.successCount,
                       failureCount: !data.success ? r.failureCount + 1 : r.failureCount,
+                      executionCount: (r.executionCount ?? (r.successCount + r.failureCount)) + 1,
                     }
                   : r
               )
             );
           }
 
-          // Trigger notification on failure
+          // Trigger failure notification if needed
           if (!data.success) {
             const isInactive =
               data.statusCode === 404 ||
@@ -522,27 +765,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             };
             setNotifications((prev) => [failureNotif, ...prev]);
           }
+
+          lastResult = {
+            success: !!data.success,
+            status: data.success ? 'Success' : 'Failed',
+            httpStatus: data.statusCode || (data.success ? 200 : res.status || 500),
+            durationMs,
+            log: logEntry,
+            response: data.response,
+            errorMessage: data.error,
+            diagnosticHint: data.diagnosticHint,
+            n8nHint: data.n8nHint,
+          };
         } catch (err: any) {
-          console.warn('Could not dispatch webhook:', err);
+          const durationMs = Date.now() - startTime;
+          console.error('[AutomationDispatcher] ❌ Network Error:', err);
           const errorLog: AutomationLog = {
             id: `log_err_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             organizationId: currentOrg.id,
             ruleId: activeRule?.id,
+            ruleName,
             automationName: ruleName,
-            triggerEvent: event as any,
+            triggerEvent: canonicalEvent,
             status: 'Failed',
             timestamp: new Date().toISOString(),
-            durationMs: Date.now() - startTime,
+            durationMs,
+            executionDurationMs: durationMs,
             httpStatus: 500,
             payload: completePayload,
+            targetWebhookUrl: targetUrl,
             errorMessage: err.message || 'Network error during dispatch',
             retryCount: 0,
           };
           setAutomationLogs((prev) => [errorLog, ...prev]);
+          lastResult = {
+            success: false,
+            status: 'Failed',
+            httpStatus: 500,
+            durationMs,
+            log: errorLog,
+            errorMessage: err.message || 'Network error during dispatch',
+            diagnosticHint: undefined,
+            n8nHint: undefined,
+            response: undefined,
+          };
         }
       }
+
+      return lastResult;
     },
     [automations, settings, currentOrg, currentUser]
+  );
+
+  // Reusable helper calling central triggerAutomation
+  const dispatchWebhookEvent = useCallback(
+    async (event: AutomationRule['triggerEvent'] | string, rawPayload: Record<string, any>, customRuleName?: string) => {
+      await triggerAutomation(event as string, rawPayload, { customRuleName });
+    },
+    [triggerAutomation]
   );
 
   // Switch role helper for instant RBAC demo testing
@@ -1505,6 +1785,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         logActivity('update', 'settings', 'org_settings', 'Integration & Webhook Settings', undefined, 'Saved configuration');
         return updated;
       });
+
+      if (newSettings.n8nWebhookUrl) {
+        const newUrl = newSettings.n8nWebhookUrl;
+        setAutomations((prev) =>
+          prev.map((rule) => ({
+            ...rule,
+            targetWebhookUrl: newUrl,
+          }))
+        );
+      }
     },
     [logActivity]
   );
@@ -1571,10 +1861,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [logActivity]
   );
 
+  const updateAutomationRule = useCallback(
+    async (ruleId: string, updates: Partial<AutomationRule>) => {
+      setAutomations((prev) =>
+        prev.map((r) => {
+          if (r.id === ruleId) {
+            const updated = { ...r, ...updates };
+            logActivity(
+              'update',
+              'automations',
+              r.id,
+              r.name,
+              undefined,
+              `Updated webhook endpoint: ${updates.targetWebhookUrl || 'rule settings'}`
+            );
+            return updated;
+          }
+          return r;
+        })
+      );
+    },
+    [logActivity]
+  );
+
   const triggerAutomationRule = useCallback(
     async (ruleId: string, customPayload?: Record<string, any>) => {
       const rule = automations.find((r) => r.id === ruleId);
-      const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL;
       const event = rule?.triggerEvent || 'manual_test';
 
       const sampleCustomer = customers[0];
@@ -1583,6 +1895,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Build context-aware test payload if customPayload is not supplied
       const rawPayload = customPayload || {
         testId: `test_${Date.now()}`,
+        ruleId: rule?.id,
         ruleName: rule?.name || 'Manual Test Trigger',
         customerName: sampleCustomer?.fullName || sampleLead?.customerName || 'Vikram Singhania',
         company: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
@@ -1607,108 +1920,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         triggeredBy: currentUser?.displayName || 'Administrator',
       };
 
-      const completePayload = buildWebhookPayload(event, rawPayload, {
-        organizationName: currentOrg.name,
-        organizationId: currentOrg.id,
-        organizationEmail: currentOrg.email,
-        organizationPhone: currentOrg.phone,
-        triggeredByName: currentUser?.displayName || 'Administrator',
-        triggeredByEmail: currentUser?.email || 'automation@apexsolutions.in',
-        targetWebhookUrl: targetUrl,
+      const result = await triggerAutomation(event, rawPayload, {
+        ruleId,
+        customRuleName: rule?.name,
+        isTestTrigger: true,
       });
 
-      const startTime = Date.now();
-      try {
-        const res = await fetch('/api/webhooks/n8n/trigger', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            webhookUrl: targetUrl,
-            apiKey: rule?.apiKey || settings.n8nApiKey,
-            authType: rule?.authType || settings.n8nAuthType,
-            event,
-            payload: completePayload,
-          }),
-        });
-
-        let data: any = {};
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          data = await res.json();
-        } else {
-          const text = await res.text();
-          data = {
-            success: res.ok,
-            statusCode: res.status,
-            durationMs: Date.now() - startTime,
-            response: text.slice(0, 500),
-            error: res.ok ? undefined : `Non-JSON server response (HTTP ${res.status})`,
-          };
-        }
-        const durationMs = data.durationMs || Date.now() - startTime;
-        const logEntry: AutomationLog = {
-          id: `log_manual_${Date.now()}`,
-          organizationId: currentOrg.id,
-          ruleId: rule?.id,
-          automationName: rule?.name || 'Manual Webhook Test',
-          triggerEvent: event as any,
-          status: data.success ? 'Success' : 'Failed',
-          timestamp: new Date().toISOString(),
-          durationMs,
-          httpStatus: data.statusCode || (data.success ? 200 : 502),
-          payload: completePayload,
-          targetWebhookUrl: targetUrl,
-          diagnosticHint: data.diagnosticHint,
-          n8nHint: data.n8nHint,
-          responseMessage: data.response
-            ? typeof data.response === 'string'
-              ? data.response
-              : JSON.stringify(data.response)
-            : data.success
-            ? 'Webhook executed successfully'
-            : undefined,
-          errorMessage: data.error,
-          retryCount: 0,
-        };
-
-        setAutomationLogs((prev) => [logEntry, ...prev]);
-
-        if (rule) {
-          setAutomations((prev) =>
-            prev.map((r) =>
-              r.id === rule.id
-                ? {
-                    ...r,
-                    lastRun: new Date().toISOString(),
-                    successCount: data.success ? r.successCount + 1 : r.successCount,
-                    failureCount: !data.success ? r.failureCount + 1 : r.failureCount,
-                  }
-                : r
-            )
-          );
-        }
-
-        return logEntry;
-      } catch (err: any) {
-        const errorLog: AutomationLog = {
-          id: `log_err_${Date.now()}`,
-          organizationId: currentOrg.id,
-          ruleId: rule?.id,
-          automationName: rule?.name || 'Manual Test',
-          triggerEvent: event as any,
-          status: 'Failed',
-          timestamp: new Date().toISOString(),
-          durationMs: Date.now() - startTime,
-          httpStatus: 500,
-          payload: completePayload,
-          errorMessage: err.message,
-          retryCount: 0,
-        };
-        setAutomationLogs((prev) => [errorLog, ...prev]);
-        return errorLog;
+      if (result.log) {
+        return result.log;
       }
+
+      // Fallback log in case no log was returned
+      const fallbackLog: AutomationLog = {
+        id: `log_res_${Date.now()}`,
+        organizationId: currentOrg.id,
+        ruleId: rule?.id,
+        ruleName: rule?.name || 'Manual Test Trigger',
+        automationName: rule?.name || 'Manual Test Trigger',
+        triggerEvent: event as any,
+        status: result.status,
+        timestamp: new Date().toISOString(),
+        durationMs: result.durationMs,
+        executionDurationMs: result.durationMs,
+        httpStatus: result.httpStatus || 200,
+        payload: rawPayload,
+        targetWebhookUrl: rule?.targetWebhookUrl || settings.n8nWebhookUrl || CONNECTED_N8N_WEBHOOK_URL,
+        errorMessage: result.errorMessage,
+        diagnosticHint: result.diagnosticHint,
+        n8nHint: result.n8nHint,
+        retryCount: 0,
+      };
+      return fallbackLog;
     },
-    [automations, settings, currentOrg, currentUser, customers, leads]
+    [automations, customers, leads, currentUser, currentOrg.id, settings.n8nWebhookUrl, triggerAutomation]
   );
 
   const retryAutomationLog = useCallback(
@@ -2047,7 +2291,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addEmployee,
       updateEmployee,
       toggleAutomationRule,
+      updateAutomationRule,
       triggerAutomationRule,
+      triggerAutomation,
       retryAutomationLog,
       testLiveWebhook,
       switchWebhookMode,
@@ -2113,7 +2359,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addEmployee,
       updateEmployee,
       toggleAutomationRule,
+      updateAutomationRule,
       triggerAutomationRule,
+      triggerAutomation,
       retryAutomationLog,
       testLiveWebhook,
       switchWebhookMode,
