@@ -1,0 +1,39 @@
+name: CI
+
+# Validates every push and pull request against main. This workflow does not
+# deploy anything — production deployment is currently a manual push through
+# AI Studio's own tooling (see DEPLOY.md), not GitHub-triggered. This exists
+# purely so a broken commit is caught before anyone deploys it by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # No package-lock.json is committed (see .gitignore) — it was
+      # generated on a different OS than production and caused problems
+      # twice before. `npm install` rather than `npm ci` is deliberate.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint (typecheck)
+        run: npm run lint
+
+      # Covers test:dispatch, test:sync and test:due. test:rules needs a
+      # Java-backed Firestore emulator and test:e2e needs a running server
+      # plus installed browsers — neither is wired up here yet.
+      - name: Unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build
