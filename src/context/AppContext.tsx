@@ -179,6 +179,38 @@ async function apiAuthHeader(): Promise<Record<string, string>> {
   }
 }
 
+/**
+ * Turn the dispatch endpoint's auth rejections into something that names the
+ * cause on THIS side of the wire.
+ *
+ * The server can only report what it did not receive: "Missing Authorization:
+ * Bearer <Firebase ID token>". Read in the UI that sounds like the server is
+ * misconfigured. It is not. It means apiAuthHeader() above found no Firebase
+ * user and sent the request bare — and the reason for that is nearly always
+ * one the client knows and the server cannot:
+ *
+ *   - a 1-click demo persona, which populates currentUser from seed data
+ *     without ever authenticating against Firebase, so auth.currentUser is
+ *     null and there is no token to attach;
+ *   - or a real session that has lapsed.
+ *
+ * Left untranslated this costs an hour of looking at server configuration for
+ * a problem that lives in the browser.
+ */
+function explainDispatchError(status: number, serverError: string | undefined): string | undefined {
+  if (status !== 401 || !/missing authorization/i.test(serverError ?? '')) {
+    return serverError;
+  }
+  return DEMO_MODE
+    ? 'Not sent — the browser had no Firebase ID token to attach. You are signed in through a ' +
+        '1-click demo persona, which does not authenticate against Firebase, while the server has ' +
+        'DISPATCH_REQUIRE_AUTH switched on. Those two settings cannot both hold. For local persona ' +
+        'testing set DISPATCH_REQUIRE_AUTH="false" in .env; to exercise the path production actually ' +
+        'uses, remove VITE_DEMO_MODE from .env, restart, and sign in with a real account.'
+    : 'Not sent — the browser had no Firebase ID token to attach, so no Authorization header went ' +
+        'with the request. The Firebase session is not active. Sign out and sign back in.';
+}
+
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const LOCAL_STORAGE_KEY = 'smart_hub_state_v1';
@@ -495,6 +527,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       event: string;
       payload: Record<string, any>;
       success: boolean;
+      /** The dispatcher deduplicated this; nothing was sent. Not a success. */
+      suppressed?: boolean;
       statusCode?: number;
       durationMs?: number;
       attempts?: number;
@@ -509,12 +543,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ruleId: o.ruleId,
         automationName: o.ruleName,
         triggerEvent: o.event as any,
-        status: o.success ? 'Success' : 'Failed',
+        status: o.suppressed ? 'Suppressed' : o.success ? 'Success' : 'Failed',
         timestamp: new Date().toISOString(),
         durationMs: o.durationMs ?? 0,
-        httpStatus: o.statusCode ?? (o.success ? 200 : 0),
+        httpStatus: o.statusCode ?? (o.suppressed ? undefined : o.success ? 200 : 0),
         payload: o.payload,
-        responseMessage: o.responseMessage ?? (o.success ? 'Delivered to n8n successfully' : undefined),
+        responseMessage:
+          o.responseMessage ?? (!o.suppressed && o.success ? 'Delivered to n8n successfully' : undefined),
         errorMessage: o.errorMessage,
         retryCount: Math.max(0, (o.attempts ?? 1) - 1),
       };
@@ -527,15 +562,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ? {
                   ...r,
                   lastRun: new Date().toISOString(),
-                  successCount: o.success ? (r.successCount ?? 0) + 1 : r.successCount ?? 0,
-                  failureCount: o.success ? r.failureCount ?? 0 : (r.failureCount ?? 0) + 1,
+                  // A suppressed dispatch is counted as neither.
+                  successCount:
+                    !o.suppressed && o.success ? (r.successCount ?? 0) + 1 : r.successCount ?? 0,
+                  failureCount:
+                    !o.suppressed && !o.success ? (r.failureCount ?? 0) + 1 : r.failureCount ?? 0,
                 }
               : r
           )
         );
       }
 
-      if (!o.success) {
+      // A duplicate is not an incident; do not raise a failure notification.
+      if (!o.success && !o.suppressed) {
         setNotifications((prev) => [
           {
             id: `notif_${stamp}`,
@@ -657,12 +696,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               event,
               payload: completePayload,
               success: Boolean(data.success),
+              suppressed: data.status === 'skipped',
               statusCode: data.statusCode,
               durationMs: data.durationMs ?? Date.now() - startedAt,
               attempts: data.attempts,
               responseMessage:
                 typeof data.response === 'string' ? data.response : data.response ? JSON.stringify(data.response) : undefined,
-              errorMessage: data.error,
+              errorMessage: explainDispatchError(res.status, data.error),
             });
           } catch (err) {
             // Network failure, non-JSON response, anything. It gets logged.
@@ -1735,9 +1775,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const sampleCustomer = customers[0];
       const sampleLead = leads[0];
 
+      /*
+        A single test id, reused as the record reference AND the idempotency
+        key below.
+
+        This payload used to carry `invoiceNumber: 'INV-2026-108'` and
+        `ticketNumber: 'TKT-8901'` as hardcoded literals for EVERY event —
+        which is wrong on its own (a new_lead does not have an invoice
+        number), and had a second, worse consequence. The server derives an
+        idempotency key from `payload.id ?? payload.invoiceNumber ?? ...`, so
+        every click produced the identical key
+        `org|new_lead|INV-2026-108`, and the dispatcher suppressed all of them
+        as duplicates for six hours. Only the first click of the day ever
+        reached n8n; the rest were recorded as Success with HTTP 200.
+      */
+      const testId = `test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
       // Build context-aware test payload if customPayload is not supplied
       const rawPayload = customPayload || {
-        testId: `test_${Date.now()}`,
+        testId,
+        id: testId,
         ruleName: rule?.name || 'Manual Test Trigger',
         customerName: sampleCustomer?.fullName || sampleLead?.customerName || 'Vikram Singhania',
         company: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
@@ -1749,13 +1806,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         requirement: 'Automated CRM integration & WhatsApp webhook pipeline testing',
         value: 125000,
         estimatedValue: 125000,
-        ticketNumber: 'TKT-8901',
+        ticketNumber: `TEST-${testId.slice(-6)}`,
         complaintType: 'Service Delivery',
         priority: 'High',
         slaHours: 24,
         taskName: 'Review n8n webhook workflow execution and customer notification',
         dueDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
-        invoiceNumber: 'INV-2026-108',
+        invoiceNumber: `TEST-${testId.slice(-6)}`,
         grandTotal: 147500,
         amountPaid: 50000,
         balanceDue: 97500,
@@ -1780,31 +1837,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           body: JSON.stringify({
             webhookUrl: targetUrl,
             event,
+            ruleId: rule?.id,
+            ruleName: rule?.name,
             payload: completePayload,
+            /*
+              An explicit key, unique per click.
+
+              Without one the server derives a key from the payload, which for
+              a manual test is the same every time. Deduplicating a Test
+              Trigger defeats its only purpose: the button exists to send a
+              request now and show what came back.
+            */
+            idempotencyKey: `manual:${rule?.id ?? 'none'}:${testId}`,
           }),
         });
 
         const data = await res.json();
         const durationMs = data.durationMs || Date.now() - startTime;
+        const suppressed = data.status === 'skipped';
         const logEntry: AutomationLog = {
           id: `log_manual_${Date.now()}`,
           organizationId: currentOrg.id,
           ruleId: rule?.id,
           automationName: rule?.name || 'Manual Webhook Test',
           triggerEvent: event as any,
-          status: data.success ? 'Success' : 'Failed',
+          status: suppressed ? 'Suppressed' : data.success ? 'Success' : 'Failed',
           timestamp: new Date().toISOString(),
           durationMs,
-          httpStatus: data.statusCode || (data.success ? 200 : 502),
+          // No invented status code. A suppressed dispatch never got one,
+          // and claiming 200 is how this looked like a delivery.
+          httpStatus: data.statusCode ?? (suppressed ? undefined : data.success ? 200 : 502),
           payload: completePayload,
           responseMessage: data.response
             ? typeof data.response === 'string'
               ? data.response
               : JSON.stringify(data.response)
+            : suppressed
+            ? undefined
             : data.success
             ? 'Webhook executed successfully'
             : undefined,
-          errorMessage: data.error,
+          errorMessage: explainDispatchError(res.status, data.error),
           retryCount: 0,
         };
 
@@ -1817,8 +1890,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 ? {
                     ...r,
                     lastRun: new Date().toISOString(),
-                    successCount: data.success ? r.successCount + 1 : r.successCount,
-                    failureCount: !data.success ? r.failureCount + 1 : r.failureCount,
+                    // A suppressed dispatch counts as neither. It was not
+                    // delivered, and nothing failed.
+                    successCount: !suppressed && data.success ? r.successCount + 1 : r.successCount,
+                    failureCount: !suppressed && !data.success ? r.failureCount + 1 : r.failureCount,
                   }
                 : r
             )
@@ -1882,7 +1957,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     : data.success
                     ? 'Retried successfully'
                     : undefined,
-                  errorMessage: data.error,
+                  errorMessage: explainDispatchError(res.status, data.error),
                   retryCount: l.retryCount + 1,
                   timestamp: new Date().toISOString(),
                 }
@@ -1965,30 +2040,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             webhookUrl: targetUrl,
             event: eventName,
             payload: completePayload,
+            // Same reasoning as the manual Test Trigger: a ping that gets
+            // deduplicated has told you nothing about whether n8n is reachable.
+            idempotencyKey: `ping:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
           }),
         });
 
         const data = await res.json();
         const durationMs = data.durationMs || Date.now() - startTime;
+        const suppressed = data.status === 'skipped';
 
         const logEntry: AutomationLog = {
           id: `log_live_${Date.now()}`,
           organizationId: currentOrg.id,
           automationName: 'Connected n8n Webhook Ping',
           triggerEvent: eventName as any,
-          status: data.success ? 'Success' : 'Failed',
+          status: suppressed ? 'Suppressed' : data.success ? 'Success' : 'Failed',
           timestamp: new Date().toISOString(),
           durationMs,
-          httpStatus: data.statusCode || (data.success ? 200 : 502),
+          httpStatus: data.statusCode ?? (suppressed ? undefined : data.success ? 200 : 502),
           payload: completePayload,
           responseMessage: data.response
             ? typeof data.response === 'string'
               ? data.response
               : JSON.stringify(data.response)
+            : suppressed
+            ? undefined
             : data.success
             ? 'Delivered to n8n webhook successfully'
             : undefined,
-          errorMessage: data.error,
+          errorMessage: explainDispatchError(res.status, data.error),
           retryCount: 0,
         };
 
@@ -1998,7 +2079,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           success: Boolean(data.success),
           message: data.success
             ? `Successfully delivered payload to ${targetUrl}`
-            : data.error || 'Failed to dispatch to n8n webhook',
+            : explainDispatchError(res.status, data.error) || 'Failed to dispatch to n8n webhook',
           durationMs,
         };
       } catch (err: any) {

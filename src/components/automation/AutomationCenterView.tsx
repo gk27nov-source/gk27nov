@@ -275,15 +275,26 @@ export const AutomationCenterView: React.FC = () => {
                       })}
                     </td>
                     <td className="py-3 px-4">
+                      {/*
+                        Three outcomes, three colours. 'Suppressed' used to be
+                        painted green as 'Success' — a duplicate that never left
+                        the server, recorded as a delivered HTTP 200. Amber
+                        because it is neither a delivery nor a fault.
+                      */}
                       <span
+                        title={log.status === 'Suppressed' ? log.errorMessage : undefined}
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
                           log.status === 'Success'
                             ? 'bg-emerald-50 text-emerald-700'
-                            : 'bg-red-50 text-red-700'
+                            : log.status === 'Suppressed'
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'bg-red-50 text-red-700'
                         }`}
                       >
                         {log.status === 'Success' ? (
                           <CheckCircle2 className="w-3 h-3" />
+                        ) : log.status === 'Suppressed' ? (
+                          <Clock className="w-3 h-3" />
                         ) : (
                           <AlertTriangle className="w-3 h-3" />
                         )}

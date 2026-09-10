@@ -280,7 +280,15 @@ export interface AutomationLog {
   ruleName?: string;
   automationName: string;
   triggerEvent: string;
-  status: 'Success' | 'Failed' | 'Pending';
+  /*
+    'Suppressed' is NOT a success.
+
+    The dispatcher deduplicates identical dispatches inside a six-hour window
+    and returns { success: true, status: 'skipped' } — true because nothing
+    went wrong, not because anything was delivered. Folding that into 'Success'
+    made the log claim an HTTP 200 for a request that was never sent.
+  */
+  status: 'Success' | 'Failed' | 'Pending' | 'Suppressed';
   timestamp: string;
   durationMs: number;
   executionDurationMs?: number;

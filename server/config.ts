@@ -156,6 +156,29 @@ export function configWarnings(): string[] {
   if (!config.requireAuth) {
     out.push('DISPATCH_REQUIRE_AUTH is OFF — the dispatch endpoint is unauthenticated. Development only.');
   }
+  /*
+    The contradiction that costs an afternoon.
+
+    VITE_DEMO_MODE turns on the 1-click role personas. Those set currentUser
+    from the seed data WITHOUT authenticating against Firebase, so
+    auth.currentUser stays null and the browser has no ID token to send. With
+    DISPATCH_REQUIRE_AUTH also on, every dispatch is then rejected with
+    "Missing Authorization: Bearer <Firebase ID token>" — a server-sounding
+    message for what is really a client with no session.
+
+    Neither setting is wrong on its own. Only the pair is. The server can see
+    both because Vite reads VITE_* from the same .env that dotenv loads here,
+    so it is worth saying out loud at boot rather than leaving someone to
+    infer it from a 401.
+  */
+  if (config.requireAuth && String(process.env.VITE_DEMO_MODE ?? '').toLowerCase() === 'true') {
+    out.push(
+      'VITE_DEMO_MODE is true AND DISPATCH_REQUIRE_AUTH is on. The demo personas do not sign in to ' +
+        'Firebase, so the browser has no ID token and EVERY dispatch will be refused with 401 ' +
+        '"Missing Authorization". Pick one: set DISPATCH_REQUIRE_AUTH="false" to keep using personas ' +
+        'locally, or remove VITE_DEMO_MODE and sign in with a real account (which is what production does).'
+    );
+  }
   if (!config.sweepToken) {
     out.push(
       'SWEEP_TOKEN is not set — /api/internal/sweep is disabled, so no scheduled reminder will ever fire.'

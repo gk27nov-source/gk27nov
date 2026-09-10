@@ -302,7 +302,7 @@ export const StockTransferAuditView: React.FC = () => {
                       </td>
 
                       <td className="py-3 px-3 text-slate-500">
-                        {new Date(trf.dispatchedAt).toLocaleDateString('en-IN')}
+                        {new Date(trf.createdAt).toLocaleDateString('en-IN')}
                       </td>
 
                       <td className="py-3 px-4 text-right">

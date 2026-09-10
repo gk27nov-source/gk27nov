@@ -30,7 +30,12 @@ function check(name: string, ok: boolean, detail = ''): void {
 /** Set exactly this environment, clearing every other N8N_* variable. */
 function env(vars: Record<string, string>): void {
   for (const key of Object.keys(process.env)) {
-    if (key.startsWith('N8N_') || key === 'DISPATCH_REQUIRE_AUTH' || key === 'FIREBASE_PROJECT_ID') {
+    if (
+      key.startsWith('N8N_') ||
+      key === 'DISPATCH_REQUIRE_AUTH' ||
+      key === 'FIREBASE_PROJECT_ID' ||
+      key === 'VITE_DEMO_MODE'
+    ) {
       delete process.env[key];
     }
   }
@@ -312,6 +317,31 @@ async function run(): Promise<void> {
     check('claiming it again is refused', !claim(k));
     release(k);
     check('after release it can be claimed again', claim(k));
+
+    /*
+      The shape of the bug that made every Test Trigger after the first one a
+      no-op for six hours.
+
+      The manual test payload carried a hardcoded invoiceNumber, so the key the
+      server derives — org | event | invoiceNumber — was byte-identical on every
+      click. The dispatch was suppressed and reported back as success with an
+      HTTP 200 that never happened.
+
+      Two keys, one varying part. If a future change reintroduces a constant
+      reference in the test payload, the first of these fails.
+    */
+    const constantRef = ['org', 'new_lead', 'INV-2026-108'] as const;
+    check(
+      'a CONSTANT record reference produces the same key twice — this is the trap',
+      idempotencyKey([...constantRef]) === idempotencyKey([...constantRef])
+    );
+    check(
+      'a per-click test id does not',
+      idempotencyKey(['org', 'new_lead', 'test_1']) !== idempotencyKey(['org', 'new_lead', 'test_2'])
+    );
+    const first = idempotencyKey(['manual:auto_01:test_1']);
+    const second = idempotencyKey(['manual:auto_01:test_2']);
+    check('so two consecutive manual tests can both be claimed', claim(first) && claim(second));
     release(k);
   }
 
@@ -340,6 +370,30 @@ async function run(): Promise<void> {
   check(
     'unauthenticated dispatch is called out',
     configWarnings().some((w) => w.includes('DISPATCH_REQUIRE_AUTH is OFF'))
+  );
+
+  /*
+    The demo-mode contradiction. Personas do not sign in to Firebase, so with
+    the token check also on there is no token to present and every dispatch
+    401s. The pair has to be named at boot, because from the browser it looks
+    like a server fault.
+  */
+  env({ VITE_DEMO_MODE: 'true', DISPATCH_REQUIRE_AUTH: 'true', FIREBASE_PROJECT_ID: 'p', N8N_WEBHOOK_URL: 'https://x.test/webhook/a' });
+  check(
+    'demo personas plus a required token is called out as the contradiction it is',
+    configWarnings().some((w) => w.includes('VITE_DEMO_MODE is true AND DISPATCH_REQUIRE_AUTH is on'))
+  );
+
+  env({ VITE_DEMO_MODE: 'true', DISPATCH_REQUIRE_AUTH: 'false', N8N_WEBHOOK_URL: 'https://x.test/webhook/a' });
+  check(
+    'demo personas with the token check off is a coherent pair, so no contradiction warning',
+    !configWarnings().some((w) => w.includes('VITE_DEMO_MODE is true AND'))
+  );
+
+  env({ DISPATCH_REQUIRE_AUTH: 'true', FIREBASE_PROJECT_ID: 'p', N8N_WEBHOOK_URL: 'https://x.test/webhook/a' });
+  check(
+    'and a real-sign-in build raises nothing about demo mode',
+    !configWarnings().some((w) => w.includes('VITE_DEMO_MODE'))
   );
 
   env({ N8N_AUTH_TYPE: 'hmac', N8N_WEBHOOK_URL: 'https://x.test/webhook/a', FIREBASE_PROJECT_ID: 'p' });
