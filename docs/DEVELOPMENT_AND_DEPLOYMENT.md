@@ -1,5 +1,76 @@
 # Smart Business Automation Hub — Development & Deployment
 
+## Single source of truth — read this first
+
+**`gk27nov-source/smart_business_automation_hub`, branch `main`, is the only
+authoritative copy of this application.** Every other checkout, export, or
+repository is downstream of it or obsolete. This is a permanent rule, not a
+one-time migration note.
+
+### GitHub is authoritative
+
+`main` on the canonical repo is the production source of truth. If a piece
+of code isn't on `main` (merged through a reviewed PR), it isn't real yet —
+no matter how long it's been working on someone's machine.
+
+### Claude Code development
+
+Always start from a feature branch off `main`, never commit to `main`
+directly, and never begin work from a stale local folder:
+
+```bash
+cd C:\Users\HP\sbah-final
+git checkout main
+git pull origin main
+git checkout -b feature/<short-description>
+
+# edit, test at localhost:3000, run lint/test/build
+
+git add .
+git commit -m "<meaningful commit message>"
+git push -u origin feature/<short-description>
+```
+
+```
+Feature Branch → Pull Request → Review / CI → main → Deployment
+```
+
+**Claude Code must never begin normal development from
+`C:\Users\HP\sbah-phase4-0936` or a newly exported AI Studio folder.** Those
+are not tracked against the canonical repo — work done there doesn't exist
+as far as `main` is concerned, and a second folder is exactly how this
+project ended up with two diverging copies before. If AI Studio produces
+changed source files (from edits made in its own UI), they must first be
+reconciled onto a git branch and merged through a PR before they become
+authoritative — never copied over `main` directly.
+
+### AI Studio
+
+AI Studio must consume and deploy the canonical GitHub code whenever that's
+technically possible (see "Deployment" below for the current, still-manual,
+reality). Do not make ongoing edits inside AI Studio's own editor that
+diverge from `main` — if AI Studio's UI is used to change something, treat
+the result the same as any other local edit: branch, PR, merge, *then*
+publish. Two independently-evolving versions of this app is the exact
+failure mode this document exists to prevent.
+
+### Production
+
+A production deployment must always correspond to a known commit on `main`.
+There is currently no automated way to ask the running application which
+commit it's serving — no version/build endpoint exists yet. Until one is
+added, the practical discipline is: **note the `main` commit SHA you are
+about to publish before running the AI Studio publish step**, and consider
+tagging it (`git tag deployed-2026-09-11 <sha> && git push origin
+deployed-2026-09-11`) so "what's live" stays answerable without guessing.
+
+### Rollback
+
+See the "Rollback" section near the end of this document for the exact git
+and AI-Studio-side steps. In short: `git revert` on `main` for the code,
+AI Studio's revision history for the running service — and neither touches
+Firestore data or security rules by itself.
+
 ## Architecture
 
 ```
