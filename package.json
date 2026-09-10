@@ -14,7 +14,8 @@
     "test:dispatch": "tsx server/selftest.ts",
     "test:sync": "tsx src/hooks/syncDiff.test.mts",
     "test": "npm run lint && npm run test:dispatch && npm run test:sync && npm run test:due",
-    "test:due": "tsx server/due.test.ts"
+    "test:due": "tsx server/due.test.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -37,6 +38,7 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "autoprefixer": "^10.4.21",
     "tsx": "^4.21.0"
   },

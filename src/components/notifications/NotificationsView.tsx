@@ -131,7 +131,7 @@ export const NotificationsView: React.FC = () => {
                   <p className="text-xs text-slate-600">{notif.message}</p>
                   <div className="text-[11px] text-slate-400 flex items-center gap-1 mt-1">
                     <Clock className="w-3 h-3" />
-                    <span>{new Date(notif.timestamp).toLocaleString()}</span>
+                    <span>{new Date(notif.createdAt).toLocaleString()}</span>
                   </div>
                 </div>
               </div>

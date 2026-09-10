@@ -322,11 +322,14 @@ export const SettingsView: React.FC = () => {
               <label className="block font-semibold text-slate-700 mb-1">Target n8n Webhook URL</label>
               <input
                 type="url"
-                required
+                placeholder="https://your-n8n-instance.com/webhook/business-hub"
                 value={integrationForm.n8nWebhookUrl}
                 onChange={(e) => setIntegrationForm({ ...integrationForm, n8nWebhookUrl: e.target.value })}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
+              <p className="mt-1 text-[11px] text-slate-400">
+                Leave blank to disconnect. The server falls back to N8N_WEBHOOK_URL when no URL is saved here.
+              </p>
             </div>
 
             <div>
