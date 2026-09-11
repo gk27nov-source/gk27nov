@@ -78,7 +78,7 @@ Rules:
     });
 
     const aiResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       contents: contents,
       config: {
         systemInstruction: systemInstruction,
@@ -88,7 +88,7 @@ Rules:
 
     res.json({
       response: aiResponse.text || 'No response generated.',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
     });
   } catch (error: any) {
     console.error('Error calling Gemini API:', error);
@@ -118,7 +118,7 @@ Context / Requirements: ${contextDetails}
 Keep it concise, clear, and action-oriented.`;
 
     const aiResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       contents: prompt,
     });
 
@@ -173,7 +173,7 @@ Provide:
 3. Recommended follow-up actions`;
 
     const aiResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       contents: prompt,
     });
 
