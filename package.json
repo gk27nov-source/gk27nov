@@ -15,7 +15,9 @@
     "test:sync": "tsx src/hooks/syncDiff.test.mts",
     "test": "npm run lint && npm run test:dispatch && npm run test:sync && npm run test:due",
     "test:due": "tsx server/due.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "verify": "npm run lint && npm test && npm run build",
+    "release:check": "node scripts/pre-release-check.mjs && npm run verify"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

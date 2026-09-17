@@ -8,3 +8,14 @@ coverage/
 !.env.example
 !.env.demo.example
 package-lock.json
+
+# Defense in depth: these should never live inside the repo directory at
+# all (service-account keys belong outside the repo, per scripts/*.mjs's
+# own setup instructions), but ignoring the common naming patterns means an
+# accidental `git add .` can't stage one either.
+*serviceAccountKey*.json
+*-adminsdk-*.json
+*service-account*.json
+*.pem
+*.p12
+*.key
