@@ -154,6 +154,15 @@ export const DashboardView: React.FC = () => {
     if (!hasTarget) {
       return { label: 'Not configured', dot: 'bg-amber-500', className: 'text-amber-700 bg-amber-50 border-amber-200' };
     }
+    // The most common reason "it only fires from Execute Workflow": the
+    // configured URL is n8n's TEST endpoint, which only answers while the
+    // workflow is open in the editor with "Listen for test event" armed.
+    const usesTestUrl =
+      Boolean(settings.n8nWebhookUrl?.includes('/webhook-test/')) ||
+      automations.some((a) => a.isEnabled && a.targetWebhookUrl?.includes('/webhook-test/'));
+    if (usesTestUrl) {
+      return { label: 'Using TEST url', dot: 'bg-amber-500', className: 'text-amber-700 bg-amber-50 border-amber-200' };
+    }
     const lastRun = automationLogs.reduce<(typeof automationLogs)[number] | null>(
       (latest, log) => (!latest || log.timestamp > latest.timestamp ? log : latest),
       null

@@ -28,6 +28,8 @@ export interface CompleteWebhookPayload {
   organizationId: string;
   triggeredBy: string;
   triggeredByEmail: string;
+  /** Whatever identifies the underlying record — lead id, ticket number, invoice number, etc. */
+  recordId: string;
 
   // Contact Details for WhatsApp and Email nodes in n8n
   email: string;
@@ -1147,6 +1149,22 @@ export function buildWebhookPayload(
     organizationId: orgId,
     triggeredBy: triggeredByName,
     triggeredByEmail: triggeredByEmail,
+    // A single, event-agnostic id an n8n node can log or key a lookup on,
+    // without needing to know whether this particular event calls it leadId,
+    // ticketNumber, invoiceNumber, or something else.
+    recordId: String(
+      entityData.recordId ??
+        entityData.id ??
+        entityData.leadId ??
+        entityData.customerId ??
+        entityData.ticketNumber ??
+        entityData.invoiceNumber ??
+        entityData.quotationId ??
+        entityData.taskId ??
+        entityData.documentId ??
+        entityData.communicationId ??
+        ''
+    ),
 
     // Primary Contact Fields for WhatsApp Nodes in n8n
     contactNumber: cleanPhone,

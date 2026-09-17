@@ -38,8 +38,15 @@ function build() {
     /** Master switch. With this off the dispatch endpoint refuses everything. */
     n8nEnabled: bool('N8N_ENABLED', true),
 
-    /** Default destination when a rule supplies none. */
-    defaultWebhookUrl: str('N8N_WEBHOOK_URL'),
+    /**
+     * Default destination when a rule supplies none.
+     *
+     * N8N_WEBHOOK_URL is this project's original name and stays first so
+     * nothing already configured with it breaks. N8N_WEBHOOK_BASE_URL is
+     * accepted as an alias — some n8n setup guides use that name — so either
+     * one works without renaming what is already deployed.
+     */
+    defaultWebhookUrl: str('N8N_WEBHOOK_URL') || str('N8N_WEBHOOK_BASE_URL'),
 
     /**
      * Per-rule destinations, keyed by rule id:
@@ -131,6 +138,26 @@ export function configWarnings(): string[] {
 
   if (!config.n8nEnabled) {
     out.push('N8N_ENABLED is false — the dispatch endpoint will refuse all requests.');
+  }
+  /*
+    The exact symptom this project keeps rediscovering: a workflow that only
+    ever runs from "Execute Workflow" / "Listen for test event" in the n8n
+    editor. That is what /webhook-test/ does by design — it is not a bug in
+    this app, it is the wrong URL. Said once at boot, where it is findable,
+    rather than left to look like a silent delivery failure later.
+  */
+  if (config.defaultWebhookUrl.includes('/webhook-test/')) {
+    out.push(
+      'N8N_WEBHOOK_URL is an n8n TEST url (/webhook-test/). That path only fires while the workflow is ' +
+        'open in the n8n editor with "Listen for test event" armed — which is exactly "only runs when I ' +
+        'manually click Execute Workflow". Replace it with the workflow\'s PRODUCTION /webhook/ url and ' +
+        'make sure the workflow\'s Active toggle is on.'
+    );
+  }
+  for (const [ruleId, url] of Object.entries(config.ruleUrls)) {
+    if (url.includes('/webhook-test/')) {
+      out.push(`N8N_RULE_URLS["${ruleId}"] is an n8n TEST url (/webhook-test/) — see the N8N_WEBHOOK_URL warning above.`);
+    }
   }
   if (!config.defaultWebhookUrl && Object.keys(config.ruleUrls).length === 0 && config.allowedHosts.length === 0) {
     out.push(

@@ -82,6 +82,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, onCloseMobile })
     if (!hasTarget) {
       return { label: 'n8n Not Configured', dot: 'bg-amber-500', pulse: false, title: 'No webhook URL saved. Add one in Settings, or per rule in Automations.' };
     }
+    const usesTestUrl =
+      Boolean(settings.n8nWebhookUrl?.includes('/webhook-test/')) ||
+      automations.some((a) => a.isEnabled && a.targetWebhookUrl?.includes('/webhook-test/'));
+    if (usesTestUrl) {
+      return {
+        label: 'n8n Using TEST url',
+        dot: 'bg-amber-500',
+        pulse: false,
+        title: 'This is an n8n /webhook-test/ url — it only fires while the workflow is open in the editor with "Listen for test event" armed. Switch to the Production /webhook/ url.',
+      };
+    }
     const lastRun = automationLogs.reduce<(typeof automationLogs)[number] | null>(
       (latest, log) => (!latest || log.timestamp > latest.timestamp ? log : latest),
       null

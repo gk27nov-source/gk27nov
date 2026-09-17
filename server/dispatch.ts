@@ -18,6 +18,59 @@ import { getConfig, type N8nAuthType } from './config';
  *     customer the same WhatsApp message again.
  */
 
+/*
+ * Structured logging.
+ *
+ * One JSON line per completed dispatch attempt, to stdout — that is what
+ * Cloud Run's logging agent picks up and makes filterable/alertable on. Every
+ * line carries an `outcome` that is one of exactly four values, so "did this
+ * fire, and if not why" is a log query, not an inference from an HTTP status:
+ *
+ *   delivered  — n8n returned 2xx
+ *   failed     — every attempt exhausted retries, or the request was refused
+ *   disabled   — N8N_ENABLED=false; nothing was ever attempted
+ *   duplicate  — an identical dispatch already succeeded inside the
+ *                idempotency window; nothing was sent, which is not a failure
+ *
+ * Never includes the auth headers or the payload — only the fields an
+ * operator needs to trace one delivery, so a log line can be shared or
+ * searched without also handing out the credential that would have gone in
+ * the request.
+ */
+type DispatchOutcome = 'delivered' | 'failed' | 'disabled' | 'duplicate' | 'dry_run';
+
+/**
+ * Redact everything a webhook URL could use as its only credential.
+ *
+ * With N8N_AUTH_TYPE=none, the random path segment n8n generates for a
+ * webhook IS the secret — anyone who can read it can replay it. So logs keep
+ * only the host and the first path segment (e.g. "/webhook") and drop the
+ * rest, rather than printing a URL that doubles as a bearer token.
+ */
+export function redactWebhookUrl(rawUrl: string | undefined): string {
+  if (!rawUrl) return '(none)';
+  try {
+    const url = new URL(rawUrl);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const visible = segments.slice(0, 1).join('/');
+    return `${url.protocol}//${url.host}${visible ? '/' + visible : ''}/***`;
+  } catch {
+    return '(invalid url)';
+  }
+}
+
+function logDispatch(outcome: DispatchOutcome, fields: Record<string, unknown>): void {
+  const line = {
+    ts: new Date().toISOString(),
+    scope: 'n8n_dispatch',
+    outcome,
+    ...fields,
+  };
+  // console.error for 'failed' so it is separable from normal traffic in log
+  // sinks that split by stream, without being a thrown exception.
+  (outcome === 'failed' ? console.error : console.log)(JSON.stringify(line));
+}
+
 export class DispatchRefused extends Error {
   constructor(message: string) {
     super(message);
@@ -325,14 +378,28 @@ export async function dispatchToN8n(opts: {
   const base = { ruleId: opts.ruleId, ruleName: opts.ruleName };
 
   if (!config.n8nEnabled) {
+    logDispatch('disabled', { ...base, durationMs: 0 });
     return { ...base, success: false, status: 'skipped', durationMs: 0, attempts: 0, error: 'N8N_ENABLED is false on the server.' };
   }
 
-  const url = resolveWebhookUrl(opts.ruleId, opts.requestedUrl); // throws DispatchRefused
+  let url: string;
+  let headers: Record<string, string>;
   const rawBody = JSON.stringify(opts.payload);
-  const headers = buildAuthHeaders(rawBody); // throws DispatchRefused
+  try {
+    url = resolveWebhookUrl(opts.ruleId, opts.requestedUrl); // throws DispatchRefused
+    headers = buildAuthHeaders(rawBody); // throws DispatchRefused
+  } catch (err) {
+    logDispatch('failed', {
+      ...base,
+      durationMs: Date.now() - started,
+      reason: 'refused',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 
   if (opts.dryRun) {
+    logDispatch('dry_run', { ...base, durationMs: Date.now() - started, endpoint: redactWebhookUrl(url) });
     return {
       ...base,
       success: true,
@@ -351,6 +418,7 @@ export async function dispatchToN8n(opts: {
 
   const key = opts.idempotency ? idempotencyKey([opts.idempotency, opts.ruleId]) : null;
   if (key && !claim(key)) {
+    logDispatch('duplicate', { ...base, durationMs: Date.now() - started, endpoint: redactWebhookUrl(url) });
     return {
       ...base,
       success: true,
@@ -376,12 +444,22 @@ export async function dispatchToN8n(opts: {
   // A failed dispatch must not block a later genuine retry.
   if (!attempt.ok && key) release(key);
 
+  const durationMs = Date.now() - started;
+  logDispatch(attempt.ok ? 'delivered' : 'failed', {
+    ...base,
+    durationMs,
+    attempts,
+    statusCode: attempt.status || undefined,
+    endpoint: redactWebhookUrl(url),
+    error: attempt.ok ? undefined : attempt.error,
+  });
+
   return {
     ...base,
     success: attempt.ok,
     status: attempt.ok ? 'success' : 'failed',
     statusCode: attempt.status || undefined,
-    durationMs: Date.now() - started,
+    durationMs,
     attempts,
     endpoint: url,
     response: attempt.body,

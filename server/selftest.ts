@@ -11,8 +11,17 @@
 
 import { createHmac } from 'crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
-import { resolveWebhookUrl, buildAuthHeaders, dispatchToN8n, DispatchRefused, claim, release, idempotencyKey } from './dispatch';
-import { configWarnings } from './config';
+import {
+  resolveWebhookUrl,
+  buildAuthHeaders,
+  dispatchToN8n,
+  DispatchRefused,
+  claim,
+  release,
+  idempotencyKey,
+  redactWebhookUrl,
+} from './dispatch';
+import { configWarnings, getConfig } from './config';
 
 let passed = 0;
 const failures: string[] = [];
@@ -413,6 +422,47 @@ async function run(): Promise<void> {
     'auth required without a project id is called out',
     configWarnings().some((w) => w.includes('FIREBASE_PROJECT_ID is not set'))
   );
+
+  console.log('\nThe exact symptom: "only runs when I click Execute Workflow"');
+
+  env({ N8N_WEBHOOK_URL: 'https://x.test/webhook-test/abc123', FIREBASE_PROJECT_ID: 'p' });
+  check(
+    'a TEST url in N8N_WEBHOOK_URL is called out at boot',
+    configWarnings().some((w) => w.includes('N8N_WEBHOOK_URL is an n8n TEST url'))
+  );
+
+  env({ N8N_WEBHOOK_URL: 'https://x.test/webhook/abc123', FIREBASE_PROJECT_ID: 'p' });
+  check(
+    'a PRODUCTION url raises no such warning',
+    !configWarnings().some((w) => w.includes('TEST url'))
+  );
+
+  console.log('\nEnvironment variable naming');
+
+  env({ N8N_WEBHOOK_URL: 'https://primary.test/webhook/a', N8N_WEBHOOK_BASE_URL: 'https://alias.test/webhook/b' });
+  check(
+    'N8N_WEBHOOK_URL wins when both are set',
+    getConfig().defaultWebhookUrl === 'https://primary.test/webhook/a'
+  );
+
+  env({ N8N_WEBHOOK_BASE_URL: 'https://alias.test/webhook/b' });
+  check(
+    'N8N_WEBHOOK_BASE_URL is accepted as an alias when N8N_WEBHOOK_URL is unset',
+    getConfig().defaultWebhookUrl === 'https://alias.test/webhook/b'
+  );
+
+  console.log('\nSecret redaction in logs');
+
+  check(
+    'a webhook url with N8N_AUTH_TYPE=none keeps its path-id out of the log line',
+    !redactWebhookUrl('https://x.app.n8n.cloud/webhook/8d2aa711-7061-44a4-9ad7-7f7cc2e5fbbe').includes('8d2aa711')
+  );
+  check(
+    'the redacted form still names the host, for tracing which destination it was',
+    redactWebhookUrl('https://x.app.n8n.cloud/webhook/8d2aa711-7061-44a4-9ad7-7f7cc2e5fbbe').includes('x.app.n8n.cloud')
+  );
+  check('an absent url redacts to a fixed placeholder, not undefined', redactWebhookUrl(undefined) === '(none)');
+  check('a malformed url redacts rather than throwing', redactWebhookUrl('not a url') === '(invalid url)');
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) {

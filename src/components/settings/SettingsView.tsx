@@ -46,9 +46,18 @@ export const SettingsView: React.FC = () => {
   });
 
   // Integrations form
+  //
+  // No placeholder secret. This used to default n8nApiKey to a literal that
+  // looked like a real credential ('n8n_sec_89df201934ba') — a hardcoded
+  // secret-shaped string shipped straight into the browser bundle. It is also
+  // no longer sent anywhere: the server ignores any apiKey/authType the
+  // client sends (server.ts) and reads the real credential only from its own
+  // N8N_SECRET environment variable. The field stays for backward
+  // compatibility with existing saved values, but a blank default is honest
+  // about the fact that it is not what authenticates the real dispatch.
   const [integrationForm, setIntegrationForm] = useState({
     n8nWebhookUrl: settings?.n8nWebhookUrl || currentOrg.n8nWebhookUrl,
-    n8nApiKey: settings?.n8nApiKey || currentOrg.n8nApiKey || 'n8n_sec_89df201934ba',
+    n8nApiKey: settings?.n8nApiKey || currentOrg.n8nApiKey || '',
     whatsappApiStatus: 'Connected (Meta Cloud API)',
     emailService: 'Verified (Google Workspace SMTP)',
     geminiModel: 'gemini-2.5-flash (Google GenAI)',
@@ -330,10 +339,23 @@ export const SettingsView: React.FC = () => {
               <p className="mt-1 text-[11px] text-slate-400">
                 Leave blank to disconnect. The server falls back to N8N_WEBHOOK_URL when no URL is saved here.
               </p>
+              {integrationForm.n8nWebhookUrl?.includes('/webhook-test/') && (
+                <p className="mt-1.5 p-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg text-[11px] font-semibold">
+                  This is an n8n TEST url. It only fires while the workflow is open in the n8n editor with
+                  "Listen for test event" armed — which looks exactly like "automations only run when I click
+                  Execute Workflow". Open the Webhook node in n8n, copy its Production URL (contains
+                  /webhook/, not /webhook-test/), and make sure the workflow's Active toggle is on.
+                </p>
+              )}
             </div>
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">API Key / Authorization Secret</label>
+              <p className="text-[11px] text-slate-400 mb-1">
+                Legacy field, kept for backward compatibility. It is not sent to the server and does not
+                authenticate the real dispatch — that credential is configured server-side via the
+                N8N_AUTH_TYPE / N8N_SECRET environment variables.
+              </p>
               <input
                 type="password"
                 value={integrationForm.n8nApiKey}

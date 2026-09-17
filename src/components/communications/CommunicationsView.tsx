@@ -16,12 +16,15 @@ import {
   Copy,
   Check,
   AlertCircle,
+  PhoneCall,
+  X,
 } from 'lucide-react';
 
 export const CommunicationsView: React.FC = () => {
   const {
     communications,
     sendCommunication,
+    requestCallback,
     customers,
     currentUser,
     employees,
@@ -42,7 +45,32 @@ export const CommunicationsView: React.FC = () => {
   const [draftPrompt, setDraftPrompt] = useState('');
   const [isSentToast, setIsSentToast] = useState(false);
 
+  const [isCallbackModalOpen, setIsCallbackModalOpen] = useState(false);
+  const [callbackPreferredTime, setCallbackPreferredTime] = useState('Within 2 hours');
+  const [callbackReason, setCallbackReason] = useState('');
+  const [isLoggingCallback, setIsLoggingCallback] = useState(false);
+  const [callbackToast, setCallbackToast] = useState(false);
+
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId) || customers[0];
+
+  const handleRequestCallback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCustomer) return;
+    setIsLoggingCallback(true);
+    try {
+      await requestCallback({
+        customerId: selectedCustomer.id,
+        preferredTime: callbackPreferredTime,
+        reason: callbackReason || undefined,
+      });
+      setIsCallbackModalOpen(false);
+      setCallbackReason('');
+      setCallbackToast(true);
+      setTimeout(() => setCallbackToast(false), 2500);
+    } finally {
+      setIsLoggingCallback(false);
+    }
+  };
 
   // Pre-configured WhatsApp Templates
   const whatsappTemplates = [
@@ -177,8 +205,18 @@ Provide only the final ready-to-send text message body.`,
           </p>
         </div>
 
-        {/* Channel Switcher */}
-        <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsCallbackModalOpen(true)}
+            disabled={!selectedCustomer}
+            className="px-3.5 py-2 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-xl shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <PhoneCall className="w-3.5 h-3.5" />
+            Log Callback Request
+          </button>
+
+          {/* Channel Switcher */}
+          <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
           <button
             onClick={() => setActiveChannel('whatsapp')}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
@@ -201,8 +239,16 @@ Provide only the final ready-to-send text message body.`,
             <Mail className="w-3.5 h-3.5" />
             Email Dispatch
           </button>
+          </div>
         </div>
       </div>
+
+      {callbackToast && (
+        <div className="p-3 rounded-xl border text-xs flex items-center gap-2 bg-emerald-50 border-emerald-200 text-emerald-800">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          Callback request logged and sent to the automation pipeline (callback_requested).
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Message Composer */}
@@ -375,6 +421,70 @@ Provide only the final ready-to-send text message body.`,
           </div>
         </div>
       </div>
+
+      {/* Log Callback Request Modal */}
+      {isCallbackModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between p-5 border-b border-slate-200 bg-amber-50/50">
+              <div className="flex items-center gap-2">
+                <PhoneCall className="w-5 h-5 text-amber-600" />
+                <h3 className="font-bold text-slate-900 text-sm">Log Customer Callback Request</h3>
+              </div>
+              <button type="button" onClick={() => setIsCallbackModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRequestCallback} className="p-6 space-y-4 text-xs">
+              <p className="text-slate-500">
+                Records that <strong>{selectedCustomer?.fullName || 'this customer'}</strong> asked to be called
+                back, and fires the <code className="bg-slate-100 px-1 py-0.5 rounded">callback_requested</code>{' '}
+                automation so n8n can notify whoever should make the call.
+              </p>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Preferred Callback Time</label>
+                <input
+                  type="text"
+                  value={callbackPreferredTime}
+                  onChange={(e) => setCallbackPreferredTime(e.target.value)}
+                  placeholder="e.g. Within 2 hours, Tomorrow 10 AM"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Reason / Topic (optional)</label>
+                <input
+                  type="text"
+                  value={callbackReason}
+                  onChange={(e) => setCallbackReason(e.target.value)}
+                  placeholder="e.g. Contract terms clarification"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsCallbackModalOpen(false)}
+                  className="px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isLoggingCallback}
+                  className="px-5 py-2 font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg shadow-xs disabled:opacity-50"
+                >
+                  {isLoggingCallback ? 'Logging...' : 'Log & Notify'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

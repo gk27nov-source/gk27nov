@@ -130,6 +130,7 @@ interface AppContextType {
   deleteDocument: (id: string) => Promise<void>;
 
   sendCommunication: (comm: Omit<Communication, 'id' | 'organizationId' | 'timestamp' | 'status'>) => Promise<void>;
+  requestCallback: (input: { customerId?: string; leadId?: string; preferredTime?: string; reason?: string }) => Promise<void>;
 
   updateSettings: (newSettings: Partial<OrganizationSettings>) => Promise<void>;
   updateBusinessProfile: (orgUpdates: Partial<Organization>) => Promise<void>;
@@ -1692,6 +1693,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [currentOrg.id, customers, logActivity, dispatchWebhookEvent]
   );
 
+  // A customer/lead asking to be called back — the one business action this
+  // app has a payload template and a seeded automation rule for, but never
+  // actually fired: nothing called dispatchWebhookEvent('callback_requested',
+  // ...) from anywhere. Logs an incoming 'call' communication (consistent
+  // with how every other channel is recorded) and fires the webhook.
+  const requestCallback = useCallback(
+    async (input: { customerId?: string; leadId?: string; preferredTime?: string; reason?: string }) => {
+      const matchedCustomer = customers.find((c) => c.id === input.customerId);
+      const matchedLead = leads.find((l) => l.id === input.leadId);
+
+      const customerName = matchedCustomer?.fullName || matchedLead?.customerName || 'Unknown Contact';
+      const company = matchedCustomer?.companyName || matchedLead?.company || '';
+      const contactNumber = matchedCustomer?.whatsappNumber || matchedCustomer?.mobileNumber || matchedLead?.mobile || undefined;
+      const email = matchedCustomer?.email || matchedLead?.email || undefined;
+
+      if (matchedCustomer) {
+        const newComm: Communication = {
+          id: `comm_${Date.now()}`,
+          organizationId: currentOrg.id,
+          customerId: matchedCustomer.id,
+          customerName,
+          channel: 'call',
+          type: 'incoming',
+          recipient: contactNumber,
+          templateName: 'Callback Request',
+          message: `Callback requested${input.preferredTime ? ` for ${input.preferredTime}` : ''}${
+            input.reason ? ` — ${input.reason}` : ''
+          }.`,
+          sentById: currentUser?.uid || 'system',
+          sentByName: currentUser?.displayName || 'Support Team',
+          status: 'sent',
+          timestamp: new Date().toISOString(),
+        };
+        setCommunications((prev) => [newComm, ...prev]);
+      }
+
+      logActivity(
+        'create',
+        'customers',
+        input.customerId || input.leadId || 'unknown',
+        customerName,
+        undefined,
+        'Logged customer callback request'
+      );
+
+      await dispatchWebhookEvent('callback_requested', {
+        recordId: input.customerId || input.leadId,
+        customerId: input.customerId,
+        leadId: input.leadId,
+        customerName,
+        company,
+        companyName: company,
+        email,
+        contactNumber,
+        phone: contactNumber,
+        whatsappNumber: contactNumber,
+        preferredTime: input.preferredTime,
+        reason: input.reason,
+      });
+    },
+    [currentOrg.id, currentUser, customers, leads, logActivity, dispatchWebhookEvent]
+  );
+
   // Settings & Profile
   const updateSettings = useCallback(
     async (newSettings: Partial<OrganizationSettings>) => {
@@ -1772,9 +1836,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const targetUrl = rule?.targetWebhookUrl || settings.n8nWebhookUrl;
       const event = rule?.triggerEvent || 'manual_test';
 
-      const sampleCustomer = customers[0];
-      const sampleLead = leads[0];
-
       /*
         A single test id, reused as the record reference AND the idempotency
         key below.
@@ -1791,18 +1852,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       */
       const testId = `test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+      /*
+        Test data must be OBVIOUSLY fake, not "whichever real customer happens
+        to be first in the list" — this used to default to `customers[0]` /
+        `leads[0]`, so clicking Test Trigger on a live deployment could hand
+        n8n a real customer's actual WhatsApp number and email, and a
+        downstream WhatsApp/email node would message them a fabricated ticket
+        or invoice. example.com is IANA-reserved for documentation and will
+        never resolve to a real inbox or phone subscriber.
+      */
+
       // Build context-aware test payload if customPayload is not supplied
       const rawPayload = customPayload || {
         testId,
         id: testId,
+        recordId: testId,
+        isTest: true,
+        test: true,
         ruleName: rule?.name || 'Manual Test Trigger',
-        customerName: sampleCustomer?.fullName || sampleLead?.customerName || 'Vikram Singhania',
-        company: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
-        companyName: sampleCustomer?.companyName || sampleLead?.company || 'Singhania Logistics Ltd',
-        contactNumber: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
-        phone: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
-        whatsappNumber: sampleCustomer?.whatsappNumber || sampleLead?.mobile || '+91 98201 94821',
-        email: sampleCustomer?.email || sampleLead?.email || 'vikram@singhanialogistics.com',
+        customerName: 'Automation Test Contact',
+        company: 'Test Automation Sandbox',
+        companyName: 'Test Automation Sandbox',
+        contactNumber: '+10000000000',
+        phone: '+10000000000',
+        whatsappNumber: '+10000000000',
+        email: 'automation-test@example.com',
         requirement: 'Automated CRM integration & WhatsApp webhook pipeline testing',
         value: 125000,
         estimatedValue: 125000,
@@ -1920,7 +1994,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return errorLog;
       }
     },
-    [automations, settings, currentOrg, currentUser, customers, leads]
+    [automations, settings, currentOrg, currentUser]
   );
 
   const retryAutomationLog = useCallback(
@@ -1993,23 +2067,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const totalPendingBalance = pendingInvoices.reduce((sum, i) => sum + (i.balanceDue || 0), 0);
       const totalRevenueCollected = invoices.reduce((sum, i) => sum + (i.amountPaid || 0), 0);
 
-      const sampleCustomer = customers[0];
-
+      // Clearly fake, never a real customer's contact details — see the same
+      // reasoning in triggerAutomationRule above. This ping can reach a real
+      // n8n workflow, and that workflow may message whatever contact the
+      // payload names.
       const rawPayload = {
         event: eventName,
+        eventId: `ping_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        recordId: 'ping',
+        isTest: true,
+        test: true,
         source: 'Smart Business Automation Hub',
         timestamp: new Date().toISOString(),
         organization: currentOrg.name,
         organizationId: currentOrg.id,
         triggeredBy: currentUser?.displayName || 'Administrator',
         userEmail: currentUser?.email || '',
-        customerName: sampleCustomer?.fullName || 'Vikram Singhania',
-        company: sampleCustomer?.companyName || 'Singhania Logistics Ltd',
-        companyName: sampleCustomer?.companyName || 'Singhania Logistics Ltd',
-        email: sampleCustomer?.email || 'vikram@singhanialogistics.com',
-        contactNumber: sampleCustomer?.whatsappNumber || '+91 98201 94821',
-        phone: sampleCustomer?.whatsappNumber || '+91 98201 94821',
-        whatsappNumber: sampleCustomer?.whatsappNumber || '+91 98201 94821',
+        customerName: 'Automation Test Contact',
+        company: 'Test Automation Sandbox',
+        companyName: 'Test Automation Sandbox',
+        email: 'automation-test@example.com',
+        contactNumber: '+10000000000',
+        phone: '+10000000000',
+        whatsappNumber: '+10000000000',
         metrics: {
           activeLeadsCount,
           pendingInvoicesCount: pendingInvoices.length,
@@ -2091,7 +2171,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
     },
-    [leads, invoices, currentOrg, currentUser, customers, settings]
+    [leads, invoices, currentOrg, currentUser, settings]
   );
 
   // Notifications
@@ -2192,6 +2272,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addDocument,
       deleteDocument,
       sendCommunication,
+      requestCallback,
       updateSettings,
       updateBusinessProfile,
       addEmployee,
@@ -2258,6 +2339,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addDocument,
       deleteDocument,
       sendCommunication,
+      requestCallback,
       updateSettings,
       updateBusinessProfile,
       addEmployee,

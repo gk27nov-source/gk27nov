@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { timingSafeEqual } from 'crypto';
 import { requireCaller, requireRole, AuthError } from './server/auth';
-import { dispatchToN8n } from './server/dispatch';
+import { dispatchToN8n, idempotencyKey as computeIdempotencyKey } from './server/dispatch';
 import { configWarnings, getConfig } from './server/config';
 import { runSweep, type SweepKind } from './server/sweeps';
 import { GoogleGenAI } from '@google/genai';
@@ -253,8 +253,19 @@ async function handleDispatch(req: express.Request, res: express.Response) {
     });
   }
 
+  // Same string this dispatch will be deduplicated on. Computed once so the
+  // eventId handed to n8n and the key the dispatcher claims against are
+  // provably the same value, not two independent computations that could
+  // drift apart.
+  const idempotencySource =
+    typeof idempotencyKey === 'string'
+      ? idempotencyKey
+      : [caller.organizationId, event, payload?.id ?? payload?.invoiceNumber ?? payload?.ticketNumber ?? ''].join('|');
+  const eventId = computeIdempotencyKey([idempotencySource, typeof ruleId === 'string' ? ruleId : undefined]);
+
   const envelope = {
     event,
+    eventId,
     timestamp: new Date().toISOString(),
     source: 'Smart Business Automation Hub',
     triggeredBy: { uid: caller.uid, email: caller.email, role: caller.role },
@@ -271,24 +282,36 @@ async function handleDispatch(req: express.Request, res: express.Response) {
       requestedUrl: typeof webhookUrl === 'string' ? webhookUrl : undefined,
       payload: envelope,
       dryRun: dryRun === true,
-      idempotency:
-        typeof idempotencyKey === 'string'
-          ? idempotencyKey
-          : [caller.organizationId, event, payload?.id ?? payload?.invoiceNumber ?? payload?.ticketNumber ?? ''].join('|'),
+      idempotency: idempotencySource,
     });
 
-    return res.status(200).json(result);
+    console.log(
+      JSON.stringify({
+        scope: 'n8n_dispatch_request',
+        event,
+        eventId,
+        organizationId: caller.organizationId,
+        ruleId: typeof ruleId === 'string' ? ruleId : undefined,
+        status: result.status,
+        statusCode: result.statusCode,
+        durationMs: result.durationMs,
+        attempts: result.attempts,
+      })
+    );
+
+    return res.status(200).json({ ...result, eventId });
   } catch (err) {
     // DispatchRefused and anything unexpected. These are configuration faults,
     // not transient failures, so they are reported rather than retried.
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`Dispatch refused for event "${event}": ${message}`);
+    console.warn(`Dispatch refused for event "${event}" (eventId ${eventId}): ${message}`);
     return res.status(200).json({
       success: false,
       status: 'failed',
       durationMs: Date.now() - started,
       attempts: 0,
       error: message,
+      eventId,
     });
   }
 }

@@ -938,7 +938,6 @@ export const initialAutomationRules: AutomationRule[] = [
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'bearer',
-    apiKey: 'n8n_sec_993821049281',
     lastRun: '2026-09-04T09:12:00.000Z',
     nextRun: '2026-09-04T14:00:00.000Z',
     successCount: 142,
@@ -954,7 +953,6 @@ export const initialAutomationRules: AutomationRule[] = [
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'bearer',
-    apiKey: 'n8n_sec_993821049281',
     lastRun: '2026-09-03T16:45:00.000Z',
     nextRun: '2026-09-04T17:00:00.000Z',
     successCount: 98,
@@ -966,11 +964,16 @@ export const initialAutomationRules: AutomationRule[] = [
     organizationId: DEMO_ORG_ID,
     name: 'Complaint Escalation & SLA Alert',
     description: 'Triggers SMS and Manager alert when critical support ticket crosses 80% SLA threshold.',
-    triggerEvent: 'new_complaint',
+    // Was 'new_complaint' — a creation event that can never express "crossed
+    // 80% of its SLA window". That is a time-based condition only the
+    // scheduled sweep can detect (server/sweeps.ts), which is what raises
+    // sla_at_risk. See SCHEDULER.md and scripts/rebind-rules.mjs, which fix
+    // this same mis-binding for organisations that were already seeded
+    // before it was caught.
+    triggerEvent: 'sla_at_risk',
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'header',
-    apiKey: 'sla_alert_token_7721',
     lastRun: '2026-09-04T10:15:00.000Z',
     nextRun: '2026-09-04T15:00:00.000Z',
     successCount: 64,
@@ -986,7 +989,6 @@ export const initialAutomationRules: AutomationRule[] = [
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'bearer',
-    apiKey: 'task_webhook_sec_8819',
     lastRun: '2026-09-04T08:00:00.000Z',
     nextRun: '2026-09-05T08:00:00.000Z',
     successCount: 210,
@@ -998,11 +1000,14 @@ export const initialAutomationRules: AutomationRule[] = [
     organizationId: DEMO_ORG_ID,
     name: 'Payment Reminder Broadcast',
     description: 'Generates automated WhatsApp and email payment link reminder 3 days before invoice due date.',
-    triggerEvent: 'callback_requested',
+    // Was 'callback_requested' — wired to an event this rule's own
+    // description has nothing to do with, so it never fired. invoice_due is
+    // the time-based event the scheduled sweep raises 3 days before an
+    // invoice's due date (INVOICE_REMINDER_LEAD_DAYS). See SCHEDULER.md.
+    triggerEvent: 'invoice_due',
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'header',
-    apiKey: 'pay_remind_token_5510',
     lastRun: '2026-09-03T11:20:00.000Z',
     nextRun: '2026-09-05T10:00:00.000Z',
     successCount: 88,
@@ -1018,12 +1023,28 @@ export const initialAutomationRules: AutomationRule[] = [
     isEnabled: true,
     targetWebhookUrl: '',
     authType: 'bearer',
-    apiKey: 'ai_doc_api_3391',
     lastRun: '2026-09-02T17:30:00.000Z',
     nextRun: '2026-09-06T12:00:00.000Z',
     successCount: 52,
     failureCount: 0,
     createdAt: '2024-02-15T12:00:00.000Z',
+  },
+  {
+    id: 'auto_07',
+    organizationId: DEMO_ORG_ID,
+    name: 'Customer Callback Request Alert',
+    description: 'Notifies the assigned rep by WhatsApp/email the moment a customer or lead asks to be called back.',
+    // The rebind above freed this event up for what it actually names — see
+    // SCHEDULER.md: "callback_requested is then free for a rule that
+    // genuinely means a callback." Fired from CommunicationsView's
+    // "Log Callback Request" action via requestCallback() in AppContext.
+    triggerEvent: 'callback_requested',
+    isEnabled: true,
+    targetWebhookUrl: '',
+    authType: 'none',
+    successCount: 0,
+    failureCount: 0,
+    createdAt: '2026-09-15T00:00:00.000Z',
   },
 ];
 
@@ -1299,7 +1320,9 @@ export const initialNotifications: AppNotification[] = [
 export const initialSettings: OrganizationSettings = {
   organizationId: DEMO_ORG_ID,
   n8nWebhookUrl: '',
-  n8nApiKey: 'n8n_sec_apex_98243144',
+  // No default secret. The real credential is server-only (N8N_SECRET), read
+  // from the environment — never from this seeded, client-visible document.
+  n8nApiKey: '',
   n8nAuthType: 'none',
   n8nEnabled: true,
   whatsappProvider: 'whatsapp_cloud_api',

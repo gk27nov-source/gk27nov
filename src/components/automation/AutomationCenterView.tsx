@@ -437,6 +437,14 @@ export const AutomationCenterView: React.FC = () => {
                 <p className="text-[11px] text-slate-500 mt-1">
                   Backend proxies requests to this URL via POST with JSON payloads.
                 </p>
+                {n8nWebhookUrl?.includes('/webhook-test/') && (
+                  <p className="mt-1.5 p-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg text-[11px] font-semibold">
+                    This is an n8n TEST url — it only fires while the workflow is open in the n8n editor with
+                    "Listen for test event" armed. That is exactly "only runs when I click Execute Workflow."
+                    Use the workflow's Production URL (/webhook/, not /webhook-test/) and make sure the
+                    workflow's Active toggle is on.
+                  </p>
+                )}
               </div>
 
               <div>
