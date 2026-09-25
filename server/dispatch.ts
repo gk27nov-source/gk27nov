@@ -59,6 +59,20 @@ export function redactWebhookUrl(rawUrl: string | undefined): string {
   }
 }
 
+/**
+ * A short, log-safe preview of what n8n sent back — enough to tell "it
+ * accepted the workflow" from "it 404'd because the workflow isn't active"
+ * without a second round-trip to n8n's own UI, and capped so a workflow that
+ * echoes its input back doesn't turn one dispatch's log line into a payload
+ * dump.
+ */
+function summarizeResponse(body: unknown): string | undefined {
+  if (body === undefined) return undefined;
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  if (!text) return undefined;
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 function logDispatch(outcome: DispatchOutcome, fields: Record<string, unknown>): void {
   const line = {
     ts: new Date().toISOString(),
@@ -451,6 +465,7 @@ export async function dispatchToN8n(opts: {
     attempts,
     statusCode: attempt.status || undefined,
     endpoint: redactWebhookUrl(url),
+    response: summarizeResponse(attempt.body),
     error: attempt.ok ? undefined : attempt.error,
   });
 
